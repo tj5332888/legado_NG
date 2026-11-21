@@ -9,6 +9,7 @@ import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.BookChapter
 import io.legado.app.data.entities.BookSource
 import io.legado.app.exception.NoStackTraceException
+import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.ChapterCacheFileMove
 import io.legado.app.model.analyzeRule.AnalyzeUrl
 import io.legado.app.model.analyzeRule.AnalyzeUrl.Companion.getMediaItem
@@ -350,7 +351,9 @@ object AudioDownloadCache {
     }
 
     private fun manifestFolder(book: Book): File {
-        return File(appCtx.externalFiles, "book_cache/${book.getFolderName()}/$AUDIO_MANIFEST_FOLDER")
+        // 与 BookHelp.cachePath 单一来源：两处各自解析 externalFiles 时，
+        // 任一方缓存过期就会让重排校验出现 root/moves 分叉（测试态已复现）。
+        return File(BookHelp.cachePath, "${book.getFolderName()}/$AUDIO_MANIFEST_FOLDER")
     }
 
     private fun readManifest(file: File): AudioCacheManifest? {

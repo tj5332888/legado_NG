@@ -22,6 +22,7 @@ enum class NgButtonShapeVariant {
     PILL,
     ROUNDED,
     SMALL_ROUNDED,
+    COMPACT_ROUNDED,
 }
 
 enum class NgSettingsTrailing {
@@ -39,7 +40,8 @@ enum class NgDialogVariant {
     CLASSIC_CONFIRMATION,
     EDITOR,
     FORM_EDITOR,
-    LONG_CONTENT
+    LONG_CONTENT,
+    SIMPLE_CONFIRMATION,
 }
 
 enum class NgStatusTagVariant {
@@ -68,10 +70,12 @@ enum class NgManagementListCardVariant {
     DEFAULT,
     COMPACT_GRID,
     MULTILINE_SUMMARY,
+    PROVIDER_TWO_ROW,
 }
 
 enum class NgFilterChipGroupVariant {
     WRAP,
+    EVEN_ROW,
     TWO_ROW_RAIL,
 
     /** 单排横向滚动轨,用于条目多但只占一行高度的筛选场景。 */

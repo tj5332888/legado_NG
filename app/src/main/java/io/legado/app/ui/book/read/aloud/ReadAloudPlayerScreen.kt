@@ -1,5 +1,7 @@
 package io.legado.app.ui.book.read.aloud
 
+import io.legado.app.model.ReadBook
+
 import androidx.annotation.DrawableRes
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.LinearEasing
@@ -49,6 +51,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -76,7 +79,9 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
@@ -88,6 +93,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -163,9 +169,16 @@ internal sealed interface ReadAloudPlayerAction {
 internal fun ReadAloudPlayerScreen(
     state: ReadAloudPlayerUiState,
     windowEnvironment: ListeningWindowEnvironment,
+    onPaneLayoutChanged: (ListeningPaneLayout?) -> Unit,
     onAction: (ReadAloudPlayerAction) -> Unit,
 ) {
     val context = LocalContext.current
+    val density = LocalDensity.current
+    val reportPaneLayout by rememberUpdatedState(onPaneLayoutChanged)
+    var windowBounds by remember { mutableStateOf<IntRect?>(null) }
+    DisposableEffect(Unit) {
+        onDispose { reportPaneLayout(null) }
+    }
     val useNoCoverFallback = state.coverPath.isNullOrBlank()
     val artwork by ListeningCoverArtwork.remember(
         context = context,
@@ -173,9 +186,35 @@ internal fun ReadAloudPlayerScreen(
         path = state.coverPath,
         sourceOrigin = state.sourceOrigin,
     )
-    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+    BoxWithConstraints(
+        modifier = Modifier.fillMaxSize().onGloballyPositioned { coordinates ->
+            val position = coordinates.positionInWindow()
+            val left = position.x.roundToInt()
+            val top = position.y.roundToInt()
+            windowBounds = IntRect(
+                left, top, left + coordinates.size.width, top + coordinates.size.height,
+            )
+        },
+    ) {
         val twoPane = shouldUseListeningTwoPane(windowEnvironment, maxWidth.value, maxHeight.value)
-        val fontScale = LocalDensity.current.fontScale
+        val measuredBounds = windowBounds?.takeIf {
+            it.width == constraints.maxWidth && it.height == constraints.maxHeight
+        }
+        val paneLayout = remember(twoPane, measuredBounds, density.density) {
+            measuredBounds?.takeIf { twoPane }?.let { bounds ->
+                calculateListeningPaneLayout(
+                    windowLeftPx = bounds.left,
+                    windowTopPx = bounds.top,
+                    widthPx = bounds.width,
+                    heightPx = bounds.height,
+                    density = density.density,
+                )
+            }
+        }
+        LaunchedEffect(paneLayout) {
+            reportPaneLayout(paneLayout)
+        }
+        val fontScale = density.fontScale
         val compactCover = maxHeight < 820.dp + (50f * (fontScale - 1f).coerceAtLeast(0f)).dp
         Box(modifier = Modifier.fillMaxSize()) {
             ListeningPlayerBackground(
@@ -191,8 +230,8 @@ internal fun ReadAloudPlayerScreen(
                     ReadAloudFluidMotionBackground(settings = state.motionSettings)
                 }
 
-                ListeningMotionEffect.CARTOON -> {
-                    ReadAloudCartoonMotionBackground(settings = state.motionSettings)
+                ListeningMotionEffect.PACKAGE -> {
+                    ReadAloudEffectPackageBackground(state.motionSettings, ReadBook.book, state.sourceOrigin)
                 }
             }
         }
@@ -525,20 +564,25 @@ private fun PlayerTwoPane(
 ) {
     Row(
         modifier = Modifier.fillMaxSize()
-            .padding(start = 28.dp, top = 76.dp, end = 28.dp, bottom = bottomPadding),
-        horizontalArrangement = Arrangement.spacedBy(24.dp),
+            .padding(
+                start = LISTENING_PANE_HORIZONTAL_PADDING_DP.dp,
+                top = 76.dp,
+                end = LISTENING_PANE_HORIZONTAL_PADDING_DP.dp,
+                bottom = bottomPadding,
+            ),
+        horizontalArrangement = Arrangement.spacedBy(LISTENING_PANE_GAP_DP.dp),
     ) {
         PlayerConstrainedCoverPage(
             state = state,
             artwork = artwork,
-            modifier = Modifier.weight(0.4f),
+            modifier = Modifier.weight(LISTENING_CONTROLS_PANE_WEIGHT),
             onAction = onAction,
         )
         PlayerTextScene(
             state = state,
             artwork = artwork,
             listState = textListState,
-            modifier = Modifier.weight(0.6f),
+            modifier = Modifier.weight(1f - LISTENING_CONTROLS_PANE_WEIGHT),
         )
     }
 }

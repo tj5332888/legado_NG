@@ -2,12 +2,15 @@
 
 package io.legado.app.ui.main
 
+import android.content.Intent
+
 import android.content.res.ColorStateList
 import android.graphics.Rect
 import android.os.Bundle
 import android.text.format.DateUtils
 import android.view.MenuItem
 import android.view.MotionEvent
+import android.view.VelocityTracker
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewConfiguration
@@ -33,6 +36,9 @@ import io.legado.app.data.appDb
 import io.legado.app.databinding.ActivityMainBinding
 import io.legado.app.help.AppWebDav
 import io.legado.app.help.ai.AiConfig
+import io.legado.app.help.pet.PetPluginStore
+import io.legado.app.help.resource.PetManagementActions
+import kotlinx.coroutines.Job
 import io.legado.app.help.ai.AiChatEntryStyle
 import io.legado.app.help.book.BookHelp
 import io.legado.app.help.config.AppConfig
@@ -47,7 +53,6 @@ import io.legado.app.help.coroutine.Coroutine
 import io.legado.app.help.storage.Backup
 import io.legado.app.lib.dialogs.alert
 import io.legado.app.lib.theme.accentColor
-import io.legado.app.lib.theme.primaryColor
 import io.legado.app.service.BaseReadAloudService
 import io.legado.app.ui.about.CrashLogsDialog
 import io.legado.app.ui.association.ImportBookSourceDialog
@@ -72,7 +77,6 @@ import io.legado.app.utils.getPrefBoolean
 import io.legado.app.utils.navigationBarHeight
 import io.legado.app.utils.observeEvent
 import io.legado.app.utils.dpToPx
-import io.legado.app.utils.setEdgeEffectColor
 import io.legado.app.utils.setOnApplyWindowInsetsListenerCompat
 import io.legado.app.utils.showDialogFragment
 import io.legado.app.utils.startActivity
@@ -80,6 +84,7 @@ import io.legado.app.utils.toastOnUi
 import io.legado.app.utils.viewbindingdelegate.viewBinding
 import kotlinx.coroutines.Dispatchers.IO
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import splitties.views.bottomPadding
@@ -100,6 +105,7 @@ class MainActivity : VMBaseActivity<ActivityMainBinding, MainViewModel>(),
 
     override val binding by viewBinding(ActivityMainBinding::inflate)
     override val viewModel by viewModels<MainViewModel>()
+    private var petLoadJob: Job? = null
     private val chatPetViewModel by viewModels<ChatPetViewModel>()
     private val idHome = MainPageIds.HOME
     private val idBookshelf = MainPageIds.BOOKSHELF
@@ -118,6 +124,7 @@ class MainActivity : VMBaseActivity<ActivityMainBinding, MainViewModel>(),
     private var shelfSwipeStartY = 0f
     private var shelfSwipeCancelled = false
     private var shelfSwipeMode = BookshelfSwipeMode.MAIN_PAGES
+    private var shelfSwipeVelocityTracker: VelocityTracker? = null
     private val fragmentMap = hashMapOf<Int, Fragment>()
     private var realPositions = MainPageIds.visible(
         AppConfig.showDiscovery,
@@ -148,8 +155,25 @@ class MainActivity : VMBaseActivity<ActivityMainBinding, MainViewModel>(),
         chatPetViewModel.restorePlacements(savedInstanceState?.getBundle("chatPetPlacements"))
         upBottomMenu()
         initView()
+        lifecycleScope.launch {
+            PetPluginStore.revision.collect {
+                if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) refreshAiChatFab()
+            }
+        }
+        lifecycleScope.launch {
+            PetManagementActions.forgottenStates.collect { removed ->
+                removed.forEach { (id, token) -> chatPetViewModel.forget(id, token) }
+                if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) {
+                    refreshAiChatFab()
+                } else if (!AiConfig.chatEntryStyle.isPet) {
+                    petLoadJob?.cancel()
+                    binding.aiChatPet.bindPet(null)
+                    binding.aiChatPet.setHostActive(false)
+                }
+            }
+        }
         upHomePage()
-        openLastReadBookAfterStartup(savedInstanceState)
+        if (!openHomeWidgets(intent)) openLastReadBookAfterStartup(savedInstanceState)
         onBackPressedDispatcher.addCallback(this) {
             if (realPositions.getOrNull(pagePosition) == idHome &&
                 (fragmentMap[idHome] as? HomeFragment)?.back() == true
@@ -190,6 +214,26 @@ class MainActivity : VMBaseActivity<ActivityMainBinding, MainViewModel>(),
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        openHomeWidgets(intent)
+    }
+
+    private fun openHomeWidgets(intent: Intent): Boolean {
+        val skinId = intent.getStringExtra(HOME_WIDGET_SKIN_REQUEST)
+        val edit = intent.getBooleanExtra(HOME_WIDGET_EDIT_REQUEST, false)
+        if (skinId == null && !edit) return false
+        intent.removeExtra(HOME_WIDGET_SKIN_REQUEST)
+        intent.removeExtra(HOME_WIDGET_EDIT_REQUEST)
+        val position = realPositions.indexOf(idHome)
+        if (position < 0) return false
+        if (skinId != null) viewModel.requestHomeWidgetSkin(skinId)
+        if (edit) viewModel.requestHomeWidgetEditing(true)
+        binding.viewPagerMain.setCurrentItem(position, false)
+        syncPageSelection(position)
+        return true
+    }
+
     override fun onPostCreate(savedInstanceState: Bundle?) {
         super.onPostCreate(savedInstanceState)
         lifecycleScope.launch {
@@ -221,13 +265,14 @@ class MainActivity : VMBaseActivity<ActivityMainBinding, MainViewModel>(),
         super.onResume()
         updateBottomNavigationStyle()
         refreshAiChatFab()
-        binding.aiChatPet.setHostActive(binding.aiChatPet.visibility == View.VISIBLE)
     }
 
     override fun onPause() {
         shelfSwipeAction = 0
         shelfSwipeEligible = false
         shelfSwipeCancelled = true
+        recycleShelfSwipeVelocityTracker()
+        petLoadJob?.cancel()
         binding.aiChatPet.setHostActive(false)
         super.onPause()
     }
@@ -239,10 +284,10 @@ class MainActivity : VMBaseActivity<ActivityMainBinding, MainViewModel>(),
 
     private fun handleBookshelfSwipe(event: MotionEvent): Boolean {
         val shelf = fragmentMap[idBookshelf1] as? BookshelfFragment1
+        if (event.actionMasked != MotionEvent.ACTION_DOWN) shelfSwipeVelocityTracker?.addMovement(event)
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
-                shelf?.completePendingGroupSwipe()
-                shelfSwipeAction = 0
+                recycleShelfSwipeVelocityTracker()
                 shelfSwipeCancelled = false
                 shelfSwipeMode = BookshelfGestureConfig.mode
                 shelfSwipeStartX = event.rawX
@@ -254,10 +299,18 @@ class MainActivity : VMBaseActivity<ActivityMainBinding, MainViewModel>(),
                     !isTouchInsideBookshelfFloatingDock(event) &&
                     !isTouchInsideView(event, binding.floatingBottomNavigation) &&
                     !isTouchInsideChatEntry(event)
+                val isGroupGesture = shelfSwipeEligible && shelfSwipeMode == BookshelfSwipeMode.GROUPS_FIRST
+                shelfSwipeAction = 0
+                if (isGroupGesture) {
+                    // Let the previous settle run until the next horizontal direction is known.
+                    shelfSwipeVelocityTracker = VelocityTracker.obtain().apply { addMovement(event) }
+                } else {
+                    shelf?.prepareGroupSwipe()
+                }
             }
             MotionEvent.ACTION_POINTER_DOWN -> {
                 if (shelfSwipeAction == -1 || shelfSwipeAction == 1) {
-                    shelf?.finishGroupSwipe(commit = false)
+                    shelf?.finishGroupSwipe()
                     shelfSwipeAction = 2
                 }
                 if (shelfSwipeEligible && shelfSwipeMode == BookshelfSwipeMode.DISABLED) {
@@ -266,6 +319,7 @@ class MainActivity : VMBaseActivity<ActivityMainBinding, MainViewModel>(),
                 }
                 shelfSwipeEligible = false
                 shelfSwipeCancelled = true
+                recycleShelfSwipeVelocityTracker()
             }
             MotionEvent.ACTION_MOVE -> if (shelfSwipeAction == -1 || shelfSwipeAction == 1) {
                 if (!shelfSwipeCancelled) shelf?.updateGroupSwipe(event.rawX - shelfSwipeStartX)
@@ -273,6 +327,7 @@ class MainActivity : VMBaseActivity<ActivityMainBinding, MainViewModel>(),
                 if (shelfSwipeMode == BookshelfSwipeMode.GROUPS_FIRST &&
                     event.eventTime - event.downTime >= ViewConfiguration.getLongPressTimeout()) {
                     shelfSwipeEligible = false
+                    recycleShelfSwipeVelocityTracker()
                     return false
                 }
                 val dx = event.rawX - shelfSwipeStartX
@@ -280,11 +335,23 @@ class MainActivity : VMBaseActivity<ActivityMainBinding, MainViewModel>(),
                 val slop = ViewConfiguration.get(this).scaledTouchSlop
                 if (abs(dy) > slop && abs(dy) >= abs(dx)) {
                     shelfSwipeEligible = false
+                    recycleShelfSwipeVelocityTracker()
                 } else if (abs(dx) > slop && abs(dx) > abs(dy)) {
                     val direction = if (dx < 0) 1 else -1
-                    shelfSwipeAction = resolveBookshelfSwipe(shelfSwipeMode, direction, shelf?.canSwipeGroup(direction) == true)
+                    val grabbedDirection = if (shelfSwipeMode == BookshelfSwipeMode.GROUPS_FIRST) {
+                        shelf?.prepareGroupSwipe(direction) ?: 0
+                    } else {
+                        0
+                    }
+                    shelfSwipeAction = if (grabbedDirection != 0) {
+                        grabbedDirection
+                    } else {
+                        resolveBookshelfSwipe(
+                            shelfSwipeMode, direction, shelf?.canSwipeGroup(direction) == true,
+                        )
+                    }
                     shelfSwipeEligible = false
-                    if ((shelfSwipeAction == -1 || shelfSwipeAction == 1) &&
+                    if (grabbedDirection == 0 && (shelfSwipeAction == -1 || shelfSwipeAction == 1) &&
                         shelf?.beginGroupSwipe(shelfSwipeAction) != true
                     ) {
                         shelfSwipeAction = 0
@@ -296,6 +363,9 @@ class MainActivity : VMBaseActivity<ActivityMainBinding, MainViewModel>(),
                             shelf?.updateGroupSwipe(dx)
                         }
                     }
+                    if (shelfSwipeAction == 0 || shelfSwipeAction == 2) {
+                        recycleShelfSwipeVelocityTracker()
+                    }
                 }
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
@@ -303,15 +373,32 @@ class MainActivity : VMBaseActivity<ActivityMainBinding, MainViewModel>(),
                 if (action == -1 || action == 1) {
                     val dx = event.rawX - shelfSwipeStartX
                     val dy = event.rawY - shelfSwipeStartY
-                    shelf?.finishGroupSwipe(commit = event.actionMasked == MotionEvent.ACTION_UP &&
-                        !shelfSwipeCancelled && -dx * action >= 48.dpToPx() && abs(dx) > abs(dy) * 1.8f)
+                    val released = event.actionMasked == MotionEvent.ACTION_UP && !shelfSwipeCancelled
+                    val intentionalSwipe = released && abs(dx) >= 48.dpToPx() && abs(dx) > abs(dy) * 1.8f
+                    val velocityX = if (released) {
+                        val maxVelocity = ViewConfiguration.get(this).scaledMaximumFlingVelocity.toFloat()
+                        shelfSwipeVelocityTracker?.apply { computeCurrentVelocity(1000, maxVelocity) }
+                            ?.getXVelocity(event.getPointerId(0)) ?: 0f
+                    } else {
+                        0f
+                    }
+                    shelf?.finishGroupSwipe(
+                        commit = if (intentionalSwipe) -dx * action > 0f else null,
+                        velocityX = velocityX,
+                    )
                 }
                 shelfSwipeAction = 0
                 shelfSwipeEligible = false
+                recycleShelfSwipeVelocityTracker()
                 return action != 0
             }
         }
         return shelfSwipeAction != 0
+    }
+
+    private fun recycleShelfSwipeVelocityTracker() {
+        shelfSwipeVelocityTracker?.recycle()
+        shelfSwipeVelocityTracker = null
     }
 
     private fun isTouchInsideView(event: MotionEvent, view: View): Boolean {
@@ -400,7 +487,7 @@ class MainActivity : VMBaseActivity<ActivityMainBinding, MainViewModel>(),
     }
 
     private fun initView() = binding.run {
-        viewPagerMain.setEdgeEffectColor(primaryColor)
+        viewPagerMain.installMainPageSwipeScroller()
         viewPagerMain.offscreenPageLimit = 3
         viewPagerMain.adapter = adapter
         viewPagerMain.addOnPageChangeListener(PageChangeCallback())
@@ -431,8 +518,12 @@ class MainActivity : VMBaseActivity<ActivityMainBinding, MainViewModel>(),
             aiChatPet.visibility = View.GONE
             if (isBookshelfPage) startBookshelfGenericAiChat() else startActivity<AiChatActivity>()
         }
-        aiChatPet.onAssetLoadFailed = { toastOnUi(R.string.ai_chat_entry_load_failed) }
-        refreshAiChatFab()
+        aiChatPet.onAssetLoadFailed = {
+            aiChatPet.setHostActive(false)
+            aiChatPet.visibility = View.GONE
+            fabAiChat.visibility = View.VISIBLE
+            toastOnUi(R.string.ai_chat_entry_load_failed)
+        }
     }
 
     private fun bindFloatingBottomBackdropToCurrentPage() = binding.run {
@@ -452,15 +543,26 @@ class MainActivity : VMBaseActivity<ActivityMainBinding, MainViewModel>(),
 
     private fun refreshAiChatFab() = binding.run {
         val style = AiConfig.chatEntryStyle
-        fabAiChat.visibility = if (style == AiChatEntryStyle.BUTTON) View.VISIBLE else View.GONE
         fabAiChat.updateAccentColor(accentColor)
-        val petEngine = style.petAssetPath?.let { chatPetViewModel.engineFor(style.id) }
-        if (petEngine != null) {
-            aiChatPet.bindEngine(petEngine)
-            aiChatPet.visibility = View.VISIBLE
-        } else {
+        petLoadJob?.cancel()
+        if (!style.isPet) {
+            chatPetViewModel.bindingFor(null)
+            aiChatPet.bindPet(null)
             aiChatPet.setHostActive(false)
             aiChatPet.visibility = View.GONE
+            fabAiChat.visibility = if (style == AiChatEntryStyle.BUTTON) View.VISIBLE else View.GONE
+            return@run
+        }
+        petLoadJob = lifecycleScope.launch {
+            val plugin = withContext(IO) { PetPluginStore.load(style.id) }
+            if (AiConfig.chatEntryStyle != style) return@launch
+            val pet = chatPetViewModel.bindingFor(plugin)
+            // Plugin callbacks may synchronously report a failure and reveal the fallback button.
+            fabAiChat.visibility = if (pet == null) View.VISIBLE else View.GONE
+            aiChatPet.bindPet(pet)
+            val ready = pet != null && !pet.failed
+            aiChatPet.visibility = if (ready) View.VISIBLE else View.GONE
+            aiChatPet.setHostActive(ready)
         }
     }
 
@@ -489,19 +591,13 @@ class MainActivity : VMBaseActivity<ActivityMainBinding, MainViewModel>(),
      * 版本更新日志
      */
     private suspend fun upVersion() = suspendCancellableCoroutine sc@{ block ->
-        if (LocalConfig.versionCode == appInfo.versionCode) {
+        val previousVersionCode = LocalConfig.versionCode
+        if (previousVersionCode == appInfo.versionCode) {
             block.resume(null)
             return@sc
         }
         LocalConfig.versionCode = appInfo.versionCode
-        if (LocalConfig.isFirstOpenApp) {
-            val help = String(assets.open("web/help/md/appHelp.md").readBytes())
-            val dialog = TextDialog(getString(R.string.help), help, TextDialog.Mode.MD)
-            dialog.setOnDismissListener {
-                block.resume(null)
-            }
-            showDialogFragment(dialog)
-        } else if (!BuildConfig.DEBUG) {
+        if (!BuildConfig.DEBUG && previousVersionCode != 0L) {
             val log = String(assets.open("updateLog.md").readBytes())
             val dialog = TextDialog(getString(R.string.update_log), log, TextDialog.Mode.MD)
             dialog.setOnDismissListener {
@@ -823,8 +919,7 @@ class MainActivity : VMBaseActivity<ActivityMainBinding, MainViewModel>(),
             if (state == ViewPager.SCROLL_STATE_IDLE) {
                 bindFloatingBottomBackdropToCurrentPage()
             } else {
-                // Drawing the pager directly lets EdgeEffect stretch the backdrop RenderNode.
-                // Its content-only parent keeps the pager on its own normal rendering layer.
+                // Sample both pages as they move across the viewport.
                 binding.floatingBottomNavigation.setLiquidBackdropSource(
                     binding.viewPagerMain.parent as View,
                 )

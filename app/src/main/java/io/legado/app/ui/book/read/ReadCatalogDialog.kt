@@ -41,14 +41,14 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
-import androidx.compose.material.icons.rounded.Lock
-import androidx.compose.material.icons.rounded.LockOpen
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ModalNavigationDrawer
@@ -58,6 +58,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
@@ -68,6 +70,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
+import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -84,16 +87,17 @@ import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.compose.ui.platform.rememberNestedScrollInteropConnection
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.fragment.app.FragmentManager
 import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.ViewModelProvider
 import com.google.android.material.bottomsheet.BottomSheetBehavior
@@ -113,6 +117,8 @@ import io.legado.app.model.ReadBook
 import io.legado.app.ui.book.bookmark.AllBookmarkFilter
 import io.legado.app.ui.book.bookmark.BookmarkNoteFilter
 import io.legado.app.ui.book.bookmark.buildAllBookmarkCollection
+import io.legado.app.ui.book.toc.TocViewModel
+import io.legado.app.ui.design.components.compose.LocalNgPaneBounds
 import io.legado.app.ui.design.components.compose.NgBottomDrawerSurface
 import io.legado.app.ui.design.components.compose.NgDrawerContentCardStyle
 import io.legado.app.ui.design.components.compose.NgDrawerThemeProvider
@@ -128,8 +134,11 @@ import io.legado.app.ui.design.theme.NgTheme
 import io.legado.app.ui.design.theme.NgThemeSnapshot
 import io.legado.app.utils.observeEvent
 import io.legado.app.utils.toastOnUi
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
@@ -143,6 +152,7 @@ internal abstract class CatalogDrawerDialog : BottomSheetDialogFragment() {
     private var cacheRunning by mutableStateOf(false)
     private var loading by mutableStateOf(true)
     private var refreshing by mutableStateOf(false)
+    private var reversed by mutableStateOf(false)
     private var dataVersion by mutableStateOf(0)
     private var catalogOutline by mutableStateOf<List<CatalogOutlineEntry>?>(null)
     private var catalogThemeSnapshot by mutableStateOf<NgThemeSnapshot?>(null)
@@ -159,6 +169,8 @@ internal abstract class CatalogDrawerDialog : BottomSheetDialogFragment() {
     protected open fun showTextTools(): Boolean = true
 
     protected open fun useDirectChapterControls(): Boolean = false
+
+    protected open fun showReadingChapterActions(): Boolean = false
 
     protected open fun showCacheState(): Boolean = false
 
@@ -186,6 +198,8 @@ internal abstract class CatalogDrawerDialog : BottomSheetDialogFragment() {
 
     protected open fun useMangaPanelTheme(): Boolean = false
 
+    protected open fun catalogPaneBounds(): IntRect? = null
+
     protected open fun catalogWindowTheme(): NgThemeSnapshot =
         ReadDrawerStyle.themeSnapshot(requireContext())
 
@@ -196,7 +210,12 @@ internal abstract class CatalogDrawerDialog : BottomSheetDialogFragment() {
     override fun onCreateDialog(savedInstanceState: Bundle?): Dialog =
         if (visualStyle() == CatalogDrawerVisualStyle.READING_COMPACT_SIDE) {
             ComponentDialog(requireContext(), R.style.AppTheme_CompactCatalog).also {
-                it.window?.let { window -> WindowCompat.setDecorFitsSystemWindows(window, false) }
+                it.window?.let { window ->
+                    WindowCompat.setDecorFitsSystemWindows(window, false)
+                    (activity as? BaseReadBookActivity)?.applySystemBarVisibility(
+                        window, hideStatusBarForOverlay = true,
+                    )
+                }
             }
         } else {
             super.onCreateDialog(savedInstanceState)
@@ -227,6 +246,18 @@ internal abstract class CatalogDrawerDialog : BottomSheetDialogFragment() {
         }
         catalogThemeSnapshot = initialCatalogTheme(book)
         cacheRunning = isCacheRunning(book)
+        loading = true
+        refreshing = false
+        val tocViewModel = if (showReadingChapterActions()) ViewModelProvider(this)[TocViewModel::class.java] else null
+        reversed = tocViewModel != null && book.getReverseToc()
+        tocViewModel?.bookData?.observe(viewLifecycleOwner) { updated ->
+            if (updated.bookUrl == catalogBook()?.bookUrl && updated.getReverseToc() != reversed) {
+                loading = true
+                reversed = updated.getReverseToc()
+                catalogOutline = null
+                loadCatalogData(updated)
+            }
+        }
         (view as ComposeView).setContent {
             val catalogContent: @Composable () -> Unit = {
                 ReadCatalogPanel(
@@ -247,7 +278,17 @@ internal abstract class CatalogDrawerDialog : BottomSheetDialogFragment() {
                     onDismiss = { dismissAllowingStateLoss() },
                     loading = loading,
                     refreshing = refreshing,
+                    reversed = reversed,
+                    reversing = tocViewModel?.isReversing == true,
+                    onReverseToc = tocViewModel?.let { model ->
+                        { if (!loading && !refreshing) model.reverseToc(catalogBook()) }
+                    },
                     dataVersion = dataVersion,
+                    isCatalogDataCurrent = { bookUrl, version ->
+                        this@CatalogDrawerDialog.view === view && dialog?.isShowing == true &&
+                            !loading && tocViewModel?.isReversing != true &&
+                            this@CatalogDrawerDialog.dataVersion == version && catalogBook()?.bookUrl == bookUrl
+                    },
                     outline = catalogOutline,
                     loadChapterIndices = { indices ->
                         withContext(Dispatchers.IO) {
@@ -258,13 +299,16 @@ internal abstract class CatalogDrawerDialog : BottomSheetDialogFragment() {
                         }
                     },
                     onRefresh = {
-                        if (!refreshing) {
+                        if (!refreshing && (tocViewModel == null || (!loading && !tocViewModel.isReversing))) {
                             refreshing = true
                             refreshCatalog(catalogBook() ?: book) { success ->
-                                refreshing = false
-                                if (this@CatalogDrawerDialog.view != null) {
-                                    if (success) loadCatalogData(catalogBook() ?: book)
-                                    else context?.toastOnUi(R.string.error_load_toc)
+                                if (success && this@CatalogDrawerDialog.view === view) {
+                                    loadCatalogData(catalogBook() ?: book) { refreshing = false }
+                                } else {
+                                    refreshing = false
+                                    if (!success && this@CatalogDrawerDialog.view === view) {
+                                        context?.toastOnUi(R.string.error_load_toc)
+                                    }
                                 }
                             }
                         }
@@ -289,23 +333,30 @@ internal abstract class CatalogDrawerDialog : BottomSheetDialogFragment() {
                             limit = limit,
                         )
                     },
-                    onChapterClick = ::onChapterSelected,
+                    onChapterClick = { if (!loading && tocViewModel?.isReversing != true) onChapterSelected(it) },
                     onCacheClick = {
                         cacheRunning = onCacheAction(book, cacheRunning)
                     },
-                    onBookmarkClick = ::onBookmarkSelected,
+                    onBookmarkClick = { if (!loading && tocViewModel?.isReversing != true) onBookmarkSelected(it) },
                     onBookmarkDelete = ::deleteBookmark,
                 )
             }
-            if (useMangaPanelTheme()) {
-                NgDrawerThemeProvider(
-                    snapshot = requireNotNull(catalogThemeSnapshot),
-                    contentCardStyle = NgDrawerContentCardStyle.ADAPTIVE,
-                    hasThemeProfile = false,
-                    content = catalogContent,
-                )
-            } else {
-                NgAppTheme(snapshot = catalogThemeSnapshot, updateSystemBars = false, content = catalogContent)
+            CompositionLocalProvider(LocalNgPaneBounds provides catalogPaneBounds()) {
+                if (useMangaPanelTheme()) {
+                    NgDrawerThemeProvider(
+                        snapshot = requireNotNull(catalogThemeSnapshot),
+                        contentCardStyle = NgDrawerContentCardStyle.ADAPTIVE,
+                        hasThemeProfile = false,
+                        content = catalogContent,
+                    )
+                } else if (this@CatalogDrawerDialog is ReadCatalogDialog) {
+                    ReadDrawerContentTheme(
+                        snapshot = requireNotNull(catalogThemeSnapshot),
+                        content = catalogContent,
+                    )
+                } else {
+                    NgAppTheme(snapshot = catalogThemeSnapshot, updateSystemBars = false, content = catalogContent)
+                }
             }
         }
         loadCatalogData(book)
@@ -334,9 +385,11 @@ internal abstract class CatalogDrawerDialog : BottomSheetDialogFragment() {
                 WindowCompat.setDecorFitsSystemWindows(this, false)
                 statusBarColor = AndroidColor.TRANSPARENT
                 navigationBarColor = AndroidColor.TRANSPARENT
+                (activity as? BaseReadBookActivity)?.applySystemBarVisibility(
+                    this, hideStatusBarForOverlay = true,
+                )
                 WindowCompat.getInsetsController(this, decorView).apply {
                     isAppearanceLightStatusBars = !catalogWindowTheme().isDark
-                    hide(WindowInsetsCompat.Type.statusBars())
                 }
                 setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             }
@@ -374,7 +427,7 @@ internal abstract class CatalogDrawerDialog : BottomSheetDialogFragment() {
             .onFailure { AppLog.put("显示阅读目录抽屉失败 tag:$tag", it) }
     }
 
-    private fun loadCatalogData(book: Book) {
+    private fun loadCatalogData(book: Book, onLoaded: () -> Unit = {}) {
         viewLifecycleOwner.lifecycleScope.launch {
             runCatching {
                 withContext(Dispatchers.IO) {
@@ -406,9 +459,15 @@ internal abstract class CatalogDrawerDialog : BottomSheetDialogFragment() {
                 cachedChapterFiles = cacheFiles
                 dataVersion++
             }.onFailure {
+                if (it is CancellationException) throw it
+                if (loading) {
+                    chapterCount = 0
+                    catalogOutline = null
+                }
                 AppLog.put("阅读目录抽屉加载失败\n${it.localizedMessage}", it)
             }
             loading = false
+            onLoaded()
         }
     }
 
@@ -500,6 +559,11 @@ internal abstract class CatalogDrawerDialog : BottomSheetDialogFragment() {
 
 internal open class ReadCatalogDialog : CatalogDrawerDialog() {
 
+    companion object {
+        const val ARG_FROM_MORE = "fromReadMore"
+        const val MORE_NAVIGATION = "readMoreCatalogNavigation"
+    }
+
     private var bottomDialogRegistered = false
 
     override fun refreshCatalog(book: Book, complete: (Boolean) -> Unit) {
@@ -520,6 +584,8 @@ internal open class ReadCatalogDialog : CatalogDrawerDialog() {
 
     override fun showBookmarks(): Boolean = true
 
+    override fun showReadingChapterActions(): Boolean = true
+
     override fun showCacheState(): Boolean = true
 
     override fun isLocalBook(): Boolean = ReadBook.isLocalBook
@@ -536,6 +602,9 @@ internal open class ReadCatalogDialog : CatalogDrawerDialog() {
         if (readActivity.bottomDialog > 0) return false
         readActivity.bottomDialog += 1
         bottomDialogRegistered = true
+        if (visualStyle() == CatalogDrawerVisualStyle.READING_COMPACT_SIDE) {
+            readActivity.setCatalogStatusBarHidden(true)
+        }
         return true
     }
 
@@ -543,18 +612,28 @@ internal open class ReadCatalogDialog : CatalogDrawerDialog() {
         if (!bottomDialogRegistered) return
         (activity as? ReadBookActivity)?.let {
             it.bottomDialog = (it.bottomDialog - 1).coerceAtLeast(0)
+            if (visualStyle() == CatalogDrawerVisualStyle.READING_COMPACT_SIDE) {
+                it.setCatalogStatusBarHidden(false)
+            }
         }
         bottomDialogRegistered = false
     }
 
     override fun onChapterSelected(chapter: BookChapter) {
         ReadBook.openChapter(chapter.index)
-        dismissAllowingStateLoss()
+        dismissAfterNavigation()
     }
 
     override fun onBookmarkSelected(bookmark: Bookmark) {
         ReadBook.openBookmark(bookmark)
+        dismissAfterNavigation()
+    }
+
+    private fun dismissAfterNavigation() {
         dismissAllowingStateLoss()
+        if (arguments?.getBoolean(ARG_FROM_MORE) == true) {
+            parentFragmentManager.setFragmentResult(MORE_NAVIGATION, Bundle.EMPTY)
+        }
     }
 }
 
@@ -564,16 +643,23 @@ internal class ReadCompactCatalogDialog : ReadCatalogDialog() {
         CatalogDrawerVisualStyle.READING_COMPACT_SIDE
 }
 
+internal class ReadDenseCatalogDialog : ReadCatalogDialog() {
+
+    override fun visualStyle(): CatalogDrawerVisualStyle =
+        CatalogDrawerVisualStyle.READING_DENSE_LIST
+}
+
 private data class CatalogChapter(
     val chapter: BookChapter,
     val displayTitle: String,
 )
 
-private enum class CatalogTab { Chapters, Bookmarks }
+internal enum class CatalogTab { Chapters, Bookmarks }
 
 internal enum class CatalogDrawerVisualStyle {
     READING_ORIGINAL,
     READING_COMPACT_SIDE,
+    READING_DENSE_LIST,
     LISTENING,
 }
 
@@ -601,7 +687,11 @@ private fun ReadCatalogPanel(
     useMangaPanelTheme: Boolean,
     loading: Boolean,
     refreshing: Boolean,
+    reversed: Boolean,
+    reversing: Boolean,
+    onReverseToc: (() -> Unit)?,
     dataVersion: Int,
+    isCatalogDataCurrent: (String, Int) -> Boolean,
     outline: List<CatalogOutlineEntry>?,
     loadChapterIndices: suspend (List<Int>) -> List<CatalogChapter>,
     onRefresh: () -> Unit,
@@ -625,14 +715,14 @@ private fun ReadCatalogPanel(
         AllBookmarkFilter(noteFilter = bookmarkNoteFilter, color = bookmarkColorFilter)
     }
     var query by remember { mutableStateOf("") }
-    var descending by remember { mutableStateOf(false) }
+    var descending by remember(reversed) { mutableStateOf(false) }
     var collapsedVolumes by remember { mutableStateOf<Set<String>>(emptySet()) }
     val volumeIds = remember(outline) {
         outline.orEmpty().filter { it.isVolume }.mapTo(linkedSetOf()) { it.url }
     }
     val allVolumesCollapsed = volumeIds.isNotEmpty() && volumeIds.all { it in collapsedVolumes }
-    val visibleOutline = remember(outline, collapsedVolumes, descending) {
-        outline?.let { visibleCatalogRows(it, collapsedVolumes, descending) }
+    val visibleOutline = remember(outline, collapsedVolumes, descending, reversed) {
+        outline?.let { visibleCatalogRows(it, collapsedVolumes, descending, reversed) }
     }
     var visibleChapterCount by remember(chapterCount) { mutableStateOf(chapterCount) }
     val drawerColors = NgTheme.colors
@@ -664,10 +754,35 @@ private fun ReadCatalogPanel(
     val pagerState = rememberPagerState(pageCount = { tabs.size })
     val pagerScope = rememberCoroutineScope()
     val selectedTab = tabs[pagerState.currentPage.coerceIn(tabs.indices)]
+    val outlineCache = remember(book.bookUrl, dataVersion, useReplace) {
+        CatalogOutlineCache<CatalogChapter>(CATALOG_PAGE_SIZE * (CATALOG_RETAINED_PAGE_RADIUS * 2 + 1))
+    }
+    val projectionPreparation = remember(book.bookUrl, dataVersion, useReplace, outline, query, selectedTab) {
+        CatalogProjectionPreparation(CatalogProjectionState(collapsedVolumes, descending))
+    }
+    DisposableEffect(projectionPreparation) {
+        onDispose { projectionPreparation.cancel() }
+    }
+    val changeQuery: (String) -> Unit = {
+        projectionPreparation.cancel()
+        query = it
+    }
+    val refreshCatalog: () -> Unit = {
+        projectionPreparation.cancel()
+        onRefresh()
+    }
+    val selectChapter: (BookChapter) -> Unit = {
+        projectionPreparation.cancel()
+        onChapterClick(it)
+    }
+    val selectBookmark: (Bookmark) -> Unit = {
+        projectionPreparation.cancel()
+        onBookmarkClick(it)
+    }
     val clearBookmarkConditions = {
         bookmarkNoteFilter = BookmarkNoteFilter.ALL
         bookmarkColorFilter = null
-        query = ""
+        changeQuery("")
     }
     val onAutoExpandNotesChanged: (Boolean) -> Unit = {
         autoExpandNotes = it
@@ -684,23 +799,15 @@ private fun ReadCatalogPanel(
     val toolsActive = toolsExpanded || query.isNotBlank() ||
         (selectedTab == CatalogTab.Bookmarks && bookmarkFilter.isActive)
     val directChapterControls = useDirectChapterControls && selectedTab == CatalogTab.Chapters
+    val readingBottom = visualStyle == CatalogDrawerVisualStyle.READING_ORIGINAL ||
+        visualStyle == CatalogDrawerVisualStyle.READING_DENSE_LIST
+    val denseList = visualStyle == CatalogDrawerVisualStyle.READING_DENSE_LIST
     val persistentChapterSearch = directChapterControls &&
         visualStyle == CatalogDrawerVisualStyle.READING_COMPACT_SIDE
-    val catalogHeaderAction: @Composable () -> Unit = {
-        if (directChapterControls) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically) {
-                if (visualStyle == CatalogDrawerVisualStyle.READING_ORIGINAL) {
-                    CatalogSearchButton(toolsActive, contentColor, accentColor, onToolsAction)
-                }
-                CatalogRefreshButton(refreshing, accentColor, onRefresh)
-            }
-        } else CatalogToolsButton(toolsActive, contentColor, accentColor, onToolsAction)
-    }
     val bookmarkToolsPanel: @Composable () -> Unit = {
         CatalogBookmarkFilterPanel(
             query = query,
-            onQueryChange = { query = it },
+            onQueryChange = changeQuery,
             filter = bookmarkFilter,
             colors = bookmarkCollection.colors,
             onFilterChanged = {
@@ -711,7 +818,8 @@ private fun ReadCatalogPanel(
             autoExpandNotes = autoExpandNotes,
             onAutoExpandNotesChanged = onAutoExpandNotesChanged,
             variant = when (visualStyle) {
-                CatalogDrawerVisualStyle.READING_ORIGINAL -> CatalogBookmarkToolsVariant.READING_BOTTOM
+                CatalogDrawerVisualStyle.READING_ORIGINAL,
+                CatalogDrawerVisualStyle.READING_DENSE_LIST -> CatalogBookmarkToolsVariant.READING_BOTTOM
                 CatalogDrawerVisualStyle.READING_COMPACT_SIDE -> CatalogBookmarkToolsVariant.READING_COMPACT_SIDE
                 CatalogDrawerVisualStyle.LISTENING -> CatalogBookmarkToolsVariant.STANDARD
             },
@@ -723,50 +831,145 @@ private fun ReadCatalogPanel(
         visibleChapterCount = if (query.isBlank()) chapterCount else 0
     }
     LaunchedEffect(pagerState.currentPage) {
-        query = ""
+        changeQuery("")
         collapseTools()
     }
-    val volumeChildIndices = remember(outline) {
+    val volumeChildIndices = remember(outline, reversed) {
         buildSet {
             var insideVolume = false
-            outline.orEmpty().forEach { entry ->
+            catalogSourceOrder(outline.orEmpty(), reversed).forEach { entry ->
                 if (entry.isVolume) insideVolume = true
                 else if (insideVolume) add(entry.index)
             }
         }
     }
-    val toggleVolume: (BookChapter) -> Unit = { chapter ->
+    val prepareProjection: (CatalogProjectionState, Boolean, Int) -> Unit = { state, sort, fallbackAnchor ->
         val rows = outline
-        if (rows != null && query.isBlank()) {
+        val expectedBookUrl = book.bookUrl
+        if (!isCatalogDataCurrent(expectedBookUrl, dataVersion)) {
+            projectionPreparation.cancel()
+        } else if (rows != null && query.isBlank()) {
+            val oldRows = visibleOutline.orEmpty()
             val first = chapterListState.firstVisibleItemIndex
+            val anchor = oldRows.getOrNull(first)?.index ?: fallbackAnchor
             val offset = chapterListState.firstVisibleItemScrollOffset
-            val anchor = visibleOutline?.getOrNull(first)?.index ?: chapter.index
-            val nextCollapsed = if (chapter.url in collapsedVolumes) {
-                collapsedVolumes - chapter.url
-            } else collapsedVolumes + chapter.url
-            val nextRows = visibleCatalogRows(rows, nextCollapsed, descending)
-            collapsedVolumes = nextCollapsed
-            pagerScope.launch {
-                withFrameNanos { }
-                chapterListState.scrollToItem(catalogVisiblePosition(nextRows, anchor), offset)
+            val request = projectionPreparation.request(state, anchor, offset, sort)
+            val nextRows = visibleCatalogRows(rows, state.collapsedVolumes, state.descending, reversed)
+            val target = if (sort) {
+                (catalogVisiblePosition(nextRows, currentChapterIndex, reversed) - 1).coerceAtLeast(0)
+            } else catalogVisiblePosition(nextRows, anchor, reversed)
+            val job = pagerScope.launch {
+                var publishedEpoch: Int? = null
+                try {
+                    // Scrolling remains enabled while loading. Re-plan if its viewport moved.
+                    while (true) {
+                        val viewportFirst = chapterListState.firstVisibleItemIndex
+                        val viewportCount = chapterListState.layoutInfo.visibleItemsInfo.size.coerceAtLeast(1)
+                        val viewportAnchor = oldRows.getOrNull(viewportFirst)?.index ?: anchor
+                        val needed = catalogProjectionRows(nextRows, viewportFirst, viewportAnchor, target, viewportCount)
+                        val oldWindow = catalogProjectionWindow(oldRows, viewportFirst, viewportCount)
+                        val prepared = prepareCatalogProjection(outlineCache, needed, CATALOG_PAGE_SIZE) { batch ->
+                            val chapters = loadChapterIndices(batch.map { it.index })
+                            if (!isCatalogDataCurrent(expectedBookUrl, dataVersion)) {
+                                projectionPreparation.failed(request)
+                                throw CancellationException("Catalog data changed during preparation")
+                            }
+                            chapters.filter { it.chapter.bookUrl == expectedBookUrl }
+                                .associateBy { CatalogOutlineEntry(it.chapter.url, it.chapter.index, it.chapter.isVolume) }
+                        }
+                        currentCoroutineContext().ensureActive()
+                        if (!projectionPreparation.isCurrent(request)) return@launch
+                        if (!isCatalogDataCurrent(expectedBookUrl, dataVersion)) {
+                            projectionPreparation.failed(request)
+                            return@launch
+                        }
+                        if (viewportFirst != chapterListState.firstVisibleItemIndex ||
+                            viewportCount != chapterListState.layoutInfo.visibleItemsInfo.size.coerceAtLeast(1)) continue
+                        Snapshot.withMutableSnapshot {
+                            val epoch = outlineCache.beginProjection(oldWindow + needed)
+                            outlineCache.store(prepared.requested, prepared.loaded, needed, epoch)
+                            collapsedVolumes = state.collapsedVolumes
+                            descending = state.descending
+                            projectionPreparation.published(request)
+                            publishedEpoch = epoch
+                        }
+                        break
+                    }
+                    withFrameNanos { }
+                    if (!isCatalogDataCurrent(expectedBookUrl, dataVersion)) {
+                        projectionPreparation.failed(request)
+                        return@launch
+                    }
+                    if (projectionPreparation.isCurrent(request) && nextRows.isNotEmpty()) {
+                        chapterListState.scrollToItem(target, if (sort) 0 else offset)
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    projectionPreparation.failed(request)
+                } finally {
+                    publishedEpoch?.let { epoch ->
+                        outlineCache.endProjection(epoch, catalogProjectionWindow(nextRows,
+                            chapterListState.firstVisibleItemIndex,
+                            chapterListState.layoutInfo.visibleItemsInfo.size))
+                    }
+                }
             }
+            projectionPreparation.attach(request, job)
         }
     }
-
+    val toggleVolume: (BookChapter) -> Unit = { chapter ->
+        val desired = projectionPreparation.desiredState
+        val collapsed = desired.collapsedVolumes
+        prepareProjection(desired.copy(collapsedVolumes = if (chapter.url in collapsed) {
+            collapsed - chapter.url
+        } else collapsed + chapter.url), false, chapter.index)
+    }
     val toggleAllVolumes: () -> Unit = {
-        val anchor = visibleOutline?.getOrNull(chapterListState.firstVisibleItemIndex)?.index
-            ?: currentChapterIndex
-        val offset = chapterListState.firstVisibleItemScrollOffset
-        val nextCollapsed = if (allVolumesCollapsed) emptySet() else volumeIds
-        val nextRows = visibleCatalogRows(outline.orEmpty(), nextCollapsed, descending)
-        collapsedVolumes = nextCollapsed
-        pagerScope.launch {
-            withFrameNanos { }
-            chapterListState.scrollToItem(catalogVisiblePosition(nextRows, anchor), offset)
+        val desired = projectionPreparation.desiredState
+        prepareProjection(desired.copy(collapsedVolumes = if (volumeIds.all { it in desired.collapsedVolumes }) {
+            emptySet()
+        } else volumeIds), false, currentChapterIndex)
+    }
+    val toggleSort: () -> Unit = {
+        if (outline != null && query.isBlank()) {
+            val desired = projectionPreparation.desiredState
+            prepareProjection(desired.copy(descending = !desired.descending), true, currentChapterIndex)
+        } else descending = !descending
+    }
+    val chapterActionsEnabled = !loading && !refreshing && !reversing
+    val locateCurrentChapter: () -> Unit = {
+        focusManager.clearFocus()
+        keyboard?.hide()
+        val desired = projectionPreparation.desiredState
+        val volume = catalogVolumeForChapter(outline.orEmpty(), currentChapterIndex, reversed)
+        val expanded = volume?.let { desired.collapsedVolumes - it } ?: desired.collapsedVolumes
+        if (query.isBlank()) {
+            prepareProjection(desired.copy(collapsedVolumes = expanded), true, currentChapterIndex)
+        } else {
+            collapsedVolumes = expanded
+            changeQuery("")
         }
+    }
+    val catalogHeaderAction: @Composable () -> Unit = {
+        if (onReverseToc != null && selectedTab == CatalogTab.Chapters) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CatalogRefreshButton(refreshing, contentColor, refreshCatalog, enabled = chapterActionsEnabled)
+                CatalogLocateButton(chapterActionsEnabled && chapterCount > 0, contentColor, locateCurrentChapter)
+                CatalogToolsButton(toolsActive, contentColor, accentColor, onToolsAction)
+            }
+        } else if (directChapterControls) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                if (readingBottom) {
+                    CatalogSearchButton(toolsActive, contentColor, accentColor, onToolsAction)
+                }
+                CatalogRefreshButton(refreshing, accentColor, refreshCatalog)
+            }
+        } else CatalogToolsButton(toolsActive, contentColor, accentColor, onToolsAction)
     }
     val chapterToolsPanel: @Composable () -> Unit = {
-        CatalogToolsPanel(query, stringResource(R.string.read_catalog_search_chapters), { query = it },
+        CatalogToolsPanel(query, stringResource(R.string.read_catalog_search_chapters), changeQuery,
             modifier = Modifier.padding(horizontal = 16.dp),
             variant = if (persistentChapterSearch) CatalogToolsPanelVariant.MANGA_CAPSULE
                 else CatalogToolsPanelVariant.STANDARD) {
@@ -783,13 +986,23 @@ private fun ReadCatalogPanel(
                         }
                         CatalogToolSwitch(stringResource(R.string.use_replace), useReplace,
                             modifier = Modifier.weight(1f).widthIn(min = 96.dp)) {
+                            projectionPreparation.cancel()
                             useReplace = it; AppConfig.tocUiUseReplace = it
                         }
                     }
-                    if (!useDirectChapterControls) {
+                    if (onReverseToc != null) {
+                        CatalogToolSwitch(
+                            stringResource(R.string.reverse_toc), reversed,
+                            modifier = Modifier.weight(1f).widthIn(min = 96.dp),
+                            enabled = chapterActionsEnabled && chapterCount > 0,
+                        ) {
+                            projectionPreparation.cancel()
+                            onReverseToc()
+                        }
+                    } else if (!useDirectChapterControls) {
                         CatalogToolAction(stringResource(R.string.read_catalog_refresh),
                             R.drawable.ic_refresh_black_24dp, refreshing,
-                            modifier = Modifier.weight(1f), onClick = onRefresh)
+                            modifier = Modifier.weight(1f), onClick = refreshCatalog)
                     }
                     if (volumeIds.isNotEmpty()) {
                         CatalogToolAction(stringResource(if (allVolumesCollapsed) R.string.read_catalog_expand_volume
@@ -808,11 +1021,17 @@ private fun ReadCatalogPanel(
         val sideWidth = (LocalConfiguration.current.screenWidthDp.dp * 0.75f)
             .coerceAtMost(420.dp)
         LaunchedEffect(drawerState.currentValue) {
-            if (drawerState.currentValue == DrawerValue.Closed) onDismiss()
+            if (drawerState.currentValue == DrawerValue.Closed) {
+                projectionPreparation.cancel()
+                onDismiss()
+            }
         }
         BackHandler {
             if (!persistentChapterSearch && toolsExpanded) collapseTools()
-            else pagerScope.launch { drawerState.close() }
+            else {
+                projectionPreparation.cancel()
+                pagerScope.launch { drawerState.close() }
+            }
         }
         ModalNavigationDrawer(
             drawerState = drawerState,
@@ -825,14 +1044,15 @@ private fun ReadCatalogPanel(
                             .navigationBarsPadding(),
                     ) {
                         CompactCatalogBookHeader(book, contentColor, mutedColor)
-                        Row(Modifier.fillMaxWidth().height(42.dp).padding(start = 18.dp, end = 10.dp),
+                        Row(Modifier.fillMaxWidth().height(42.dp).padding(start = 12.dp, end = 10.dp),
                             verticalAlignment = Alignment.CenterVertically) {
-                            Text(stringResource(if (selectedTab == CatalogTab.Chapters) R.string.chapter_list else R.string.bookmark),
-                                color = mutedColor, fontSize = 13.sp)
-                            if (selectedTab == CatalogTab.Chapters) {
-                                CompactCatalogSortAction(descending, contentColor) { descending = !descending }
+                            Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                                Text(stringResource(if (selectedTab == CatalogTab.Chapters) R.string.chapter_list else R.string.bookmark),
+                                    color = mutedColor, fontSize = 13.sp, maxLines = 1)
+                                if (selectedTab == CatalogTab.Chapters) {
+                                    CompactCatalogSortAction(descending, contentColor, toggleSort)
+                                }
                             }
-                            Spacer(Modifier.weight(1f))
                             catalogHeaderAction()
                         }
                         if (toolsExpanded || persistentChapterSearch) {
@@ -849,7 +1069,7 @@ private fun ReadCatalogPanel(
                             )
                         } else if (query.isNotBlank()) {
                             Text(stringResource(R.string.read_catalog_search_chapter_count, visibleChapterCount),
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 6.dp),
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
                                 color = mutedColor, fontSize = 11.sp)
                         }
                         HorizontalPager(
@@ -863,6 +1083,8 @@ private fun ReadCatalogPanel(
                             } else if (tabs[page] == CatalogTab.Chapters) {
                                 Column(Modifier.fillMaxSize()) {
                                     CatalogChapterList(
+                                        bookUrl = book.bookUrl,
+                                        outlineCache = outlineCache,
                                         visibleOutline = visibleOutline.takeIf { query.isBlank() },
                                         collapsedVolumes = collapsedVolumes,
                                         loadChapterIndices = loadChapterIndices,
@@ -874,6 +1096,7 @@ private fun ReadCatalogPanel(
                                         chapterCount = chapterCount,
                                         query = query,
                                         descending = descending,
+                                        reversed = reversed,
                                         cachedChapterFiles = cachedChapterFiles,
                                         showCacheState = showCacheState,
                                         isLocalBook = isLocalBook,
@@ -887,7 +1110,7 @@ private fun ReadCatalogPanel(
                                         loadChapterPosition = loadChapterPosition,
                                         loadChapterPage = loadChapterPage,
                                         onChapterCountChanged = { visibleChapterCount = it },
-                                        onChapterClick = onChapterClick,
+                                        onChapterClick = selectChapter,
                                         compact = true,
                                         volumeChildIndices = volumeChildIndices,
                                     )
@@ -902,7 +1125,7 @@ private fun ReadCatalogPanel(
                                     contentColor = contentColor,
                                     mutedColor = mutedColor,
                                     accentColor = accentColor,
-                                    onBookmarkClick = onBookmarkClick,
+                                    onBookmarkClick = selectBookmark,
                                     onBookmarkDelete = onBookmarkDelete,
                                     compact = true,
                                     filter = bookmarkFilter,
@@ -954,14 +1177,14 @@ private fun ReadCatalogPanel(
                 .fillMaxSize()
                 .navigationBarsPadding()
                 .padding(
-                    top = if (visualStyle == CatalogDrawerVisualStyle.READING_ORIGINAL) {
+                    top = if (readingBottom) {
                         8.dp
                     } else {
                         6.dp
                     }
                 ),
         ) {
-            if (visualStyle == CatalogDrawerVisualStyle.READING_ORIGINAL) {
+            if (readingBottom) {
                 CatalogDragHandle(mutedColor = mutedColor)
             } else {
                 NgLongDrawerHeader(
@@ -980,25 +1203,44 @@ private fun ReadCatalogPanel(
                     modifier = Modifier.padding(horizontal = 8.dp),
                 )
             }
-            if (tabs.size > 1) {
+            if (denseList) {
                 Spacer(Modifier.height(4.dp))
                 Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp),
                     verticalAlignment = Alignment.CenterVertically) {
-                    CatalogTabDock(
+                    DenseCatalogTabs(
                         tabs = tabs,
                         selectedTab = selectedTab,
-                        contentColor = contentColor,
+                        mutedColor = mutedColor,
                         accentColor = accentColor,
-                        selectedContentColor = selectedContentColor,
-                        dockColor = dockColor,
                         onTabSelected = {
-                            query = ""
-                            pagerScope.launch {
-                                pagerState.animateScrollToPage(tabs.indexOf(it).coerceAtLeast(0))
-                            }
+                            changeQuery("")
+                            pagerScope.launch { pagerState.animateScrollToPage(tabs.indexOf(it)) }
                         },
                         modifier = Modifier.weight(1f),
                     )
+                    catalogHeaderAction()
+                }
+            } else if (tabs.size > 1) {
+                Spacer(Modifier.height(4.dp))
+                Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.weight(1f)) {
+                        CatalogTabDock(
+                            tabs = tabs,
+                            selectedTab = selectedTab,
+                            contentColor = contentColor,
+                            accentColor = accentColor,
+                            selectedContentColor = selectedContentColor,
+                            dockColor = dockColor,
+                            onTabSelected = {
+                                changeQuery("")
+                                pagerScope.launch {
+                                    pagerState.animateScrollToPage(tabs.indexOf(it).coerceAtLeast(0))
+                                }
+                            },
+                            modifier = if (onReverseToc != null) Modifier.widthIn(max = 168.dp) else Modifier,
+                        )
+                    }
                     if (visualStyle == CatalogDrawerVisualStyle.READING_ORIGINAL) {
                         Spacer(Modifier.width(8.dp))
                         catalogHeaderAction()
@@ -1025,7 +1267,7 @@ private fun ReadCatalogPanel(
                         if (pageTab == CatalogTab.Bookmarks) bookmarkToolsPanel() else chapterToolsPanel()
                     }
                     if (pageTab == CatalogTab.Bookmarks &&
-                        visualStyle == CatalogDrawerVisualStyle.READING_ORIGINAL) {
+                        readingBottom) {
                         CatalogBookmarkSummaryRow(
                             itemCount = filteredBookmarks.size,
                             mutedColor = mutedColor,
@@ -1046,7 +1288,7 @@ private fun ReadCatalogPanel(
                             descending = descending,
                             contentColor = contentColor,
                             mutedColor = mutedColor,
-                            onSort = { descending = !descending },
+                            onSort = toggleSort,
                         )
                     }
                     if (loading) {
@@ -1059,6 +1301,8 @@ private fun ReadCatalogPanel(
                         }
                     } else if (pageTab == CatalogTab.Chapters) {
                         CatalogChapterList(
+                            bookUrl = book.bookUrl,
+                            outlineCache = outlineCache,
                             visibleOutline = visibleOutline.takeIf { query.isBlank() },
                             collapsedVolumes = collapsedVolumes,
                             loadChapterIndices = loadChapterIndices,
@@ -1066,10 +1310,11 @@ private fun ReadCatalogPanel(
                             dataVersion = dataVersion,
                             useReplace = useReplace,
                             showWordCount = showWordCount,
-                            showUncachedWordCount = visualStyle == CatalogDrawerVisualStyle.READING_ORIGINAL,
+                            showUncachedWordCount = readingBottom,
                             chapterCount = chapterCount,
                             query = query,
                             descending = descending,
+                            reversed = reversed,
                             cachedChapterFiles = cachedChapterFiles,
                             showCacheState = showCacheState,
                             isLocalBook = isLocalBook,
@@ -1083,7 +1328,8 @@ private fun ReadCatalogPanel(
                             loadChapterPosition = loadChapterPosition,
                             loadChapterPage = loadChapterPage,
                             onChapterCountChanged = { visibleChapterCount = it },
-                            onChapterClick = onChapterClick,
+                            onChapterClick = selectChapter,
+                            dense = denseList,
                         )
                     } else {
                         CatalogBookmarkList(
@@ -1095,7 +1341,7 @@ private fun ReadCatalogPanel(
                             contentColor = contentColor,
                             mutedColor = mutedColor,
                             accentColor = accentColor,
-                            onBookmarkClick = onBookmarkClick,
+                            onBookmarkClick = selectBookmark,
                             onBookmarkDelete = onBookmarkDelete,
                             filter = bookmarkFilter,
                             query = query,
@@ -1106,7 +1352,7 @@ private fun ReadCatalogPanel(
             }
         }
     }
-    if (visualStyle == CatalogDrawerVisualStyle.READING_ORIGINAL) {
+    if (readingBottom) {
         NgGlassSurface(
             modifier = Modifier
                 .fillMaxSize()
@@ -1148,7 +1394,7 @@ private fun CatalogDragHandle(
 private fun CompactCatalogBookHeader(book: Book, contentColor: Color, mutedColor: Color) {
     Row(
         modifier = Modifier.fillMaxWidth().height(96.dp)
-            .padding(start = 20.dp, end = 16.dp),
+            .padding(start = 12.dp, end = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         NgBookCover(
@@ -1192,7 +1438,8 @@ private fun CompactCatalogSortAction(
         )
         Spacer(Modifier.width(5.dp))
         Text(stringResource(if (descending) R.string.read_catalog_descending
-            else R.string.read_catalog_ascending), color = contentColor, fontSize = 12.sp)
+            else R.string.read_catalog_ascending), color = contentColor, fontSize = 12.sp,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -1233,16 +1480,28 @@ private fun CatalogSearchButton(active: Boolean, contentColor: Color, accentColo
 }
 
 @Composable
-private fun CatalogRefreshButton(refreshing: Boolean, accentColor: Color, onClick: () -> Unit) {
+private fun CatalogRefreshButton(refreshing: Boolean, tint: Color, onClick: () -> Unit, enabled: Boolean = true) {
     val label = stringResource(R.string.read_catalog_refresh)
-    IconButton(onClick = onClick, enabled = !refreshing,
+    IconButton(onClick = onClick, enabled = enabled && !refreshing,
         modifier = Modifier.size(40.dp).semantics { contentDescription = label }) {
         if (refreshing) {
-            CircularProgressIndicator(Modifier.size(20.dp), color = accentColor, strokeWidth = 2.dp)
+            CircularProgressIndicator(Modifier.size(20.dp), color = tint, strokeWidth = 2.dp)
         } else {
             Icon(painterResource(R.drawable.ic_refresh_black_24dp), null,
-                Modifier.size(20.dp), tint = accentColor)
+                Modifier.size(20.dp), tint = tint.copy(alpha = if (enabled) 1f else 0.38f))
         }
+    }
+}
+
+@Composable
+private fun CatalogLocateButton(enabled: Boolean, contentColor: Color, onClick: () -> Unit) {
+    IconButton(onClick = onClick, enabled = enabled, modifier = Modifier.size(40.dp)) {
+        Icon(
+            painter = painterResource(R.drawable.ic_ai_locate_selected),
+            contentDescription = stringResource(R.string.read_catalog_locate_current_chapter),
+            modifier = Modifier.size(20.dp),
+            tint = contentColor.copy(alpha = if (enabled) 1f else 0.38f),
+        )
     }
 }
 
@@ -1251,6 +1510,37 @@ private fun CatalogToolsButton(active: Boolean, contentColor: Color, accentColor
     IconButton(onClick = onClick, modifier = Modifier.size(40.dp)) {
         Icon(painterResource(R.drawable.ic_tts_params_grid), stringResource(R.string.menu),
             Modifier.size(20.dp), tint = if (active) accentColor else contentColor)
+    }
+}
+
+@Composable
+internal fun DenseCatalogTabs(
+    tabs: List<CatalogTab>,
+    selectedTab: CatalogTab,
+    mutedColor: Color,
+    accentColor: Color,
+    onTabSelected: (CatalogTab) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(modifier = modifier.selectableGroup(), verticalAlignment = Alignment.CenterVertically) {
+        tabs.forEach { tab ->
+            val selected = selectedTab == tab
+            Box(
+                modifier = Modifier
+                    .height(48.dp)
+                    .widthIn(min = 64.dp)
+                    .selectable(selected = selected, role = Role.Tab) { onTabSelected(tab) },
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                Text(
+                    text = stringResource(if (tab == CatalogTab.Chapters) R.string.chapter_list else R.string.bookmark),
+                    color = if (selected) accentColor else mutedColor,
+                    fontSize = if (selected) 18.sp else 15.sp,
+                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                    maxLines = 1,
+                )
+            }
+        }
     }
 }
 
@@ -1331,7 +1621,7 @@ private fun CatalogBookmarkSummaryRow(
             showAutoExpand -> Modifier.heightIn(min = 44.dp)
             compact -> Modifier.padding(vertical = 6.dp)
             else -> Modifier.height(28.dp)
-        }).padding(horizontal = if (compact) 18.dp else 24.dp),
+        }).padding(horizontal = if (compact) 12.dp else 24.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(stringResource(R.string.read_catalog_bookmark_count, itemCount),
@@ -1421,6 +1711,8 @@ private fun CatalogSummaryRow(
 
 @Composable
 private fun CatalogChapterList(
+    bookUrl: String,
+    outlineCache: CatalogOutlineCache<CatalogChapter>,
     visibleOutline: List<CatalogOutlineEntry>?,
     collapsedVolumes: Set<String>,
     loadChapterIndices: suspend (List<Int>) -> List<CatalogChapter>,
@@ -1432,6 +1724,7 @@ private fun CatalogChapterList(
     chapterCount: Int,
     query: String,
     descending: Boolean,
+    reversed: Boolean,
     cachedChapterFiles: Set<String>,
     showCacheState: Boolean,
     isLocalBook: Boolean,
@@ -1447,9 +1740,11 @@ private fun CatalogChapterList(
     onChapterCountChanged: (Int) -> Unit,
     onChapterClick: (BookChapter) -> Unit,
     compact: Boolean = false,
+    dense: Boolean = false,
     volumeChildIndices: Set<Int> = emptySet(),
 ) {
-    var itemCount by remember(query, descending) { mutableStateOf(0) }
+    var queriedItemCount by remember(query, descending) { mutableStateOf(0) }
+    val itemCount = visibleOutline?.size ?: queriedItemCount
     var datasetLoading by remember(query, descending) { mutableStateOf(true) }
     var initialPositionApplied by remember(query, descending) { mutableStateOf(false) }
     val loadedPages = remember(query, descending, dataVersion, useReplace, visibleOutline) {
@@ -1461,12 +1756,13 @@ private fun CatalogChapterList(
             delay(220)
         }
         val totalCount = visibleOutline?.size ?: if (query.isBlank()) chapterCount else loadChapterCount(query)
-        itemCount = totalCount
+        queriedItemCount = totalCount
         onChapterCountChanged(totalCount)
+        if (visibleOutline != null && outlineCache.hasTransition) initialPositionApplied = true
         if (totalCount > 0 && !initialPositionApplied) {
             withFrameNanos { }
             val currentPosition = if (visibleOutline != null) {
-                catalogVisiblePosition(visibleOutline, currentChapterIndex)
+                catalogVisiblePosition(visibleOutline, currentChapterIndex, reversed)
             } else if (query.isBlank()) {
                 loadChapterPosition(descending, totalCount)
             } else {
@@ -1477,7 +1773,8 @@ private fun CatalogChapterList(
         }
         datasetLoading = false
     }
-    LaunchedEffect(query, descending, itemCount, dataVersion, useReplace, visibleOutline) {
+    val publishedEpoch = outlineCache.epoch
+    LaunchedEffect(bookUrl, query, descending, itemCount, dataVersion, useReplace, visibleOutline, publishedEpoch) {
         if (itemCount <= 0) return@LaunchedEffect
         snapshotFlow {
             val visibleItems = listState.layoutInfo.visibleItemsInfo
@@ -1485,18 +1782,38 @@ private fun CatalogChapterList(
             val last = visibleItems.lastOrNull()?.index ?: first
             first to last
         }.distinctUntilChanged().collectLatest { (firstVisible, lastVisible) ->
-            val preloadStart = (firstVisible - CATALOG_PRELOAD_ITEMS).coerceAtLeast(0)
+            val preloadStart = (firstVisible - CATALOG_PRELOAD_ITEMS).coerceIn(0, itemCount - 1)
             val preloadEnd = (lastVisible + CATALOG_PRELOAD_ITEMS)
-                .coerceAtMost(itemCount - 1)
+                .coerceIn(preloadStart, itemCount - 1)
             val firstPage = preloadStart / CATALOG_PAGE_SIZE
             val lastPage = preloadEnd / CATALOG_PAGE_SIZE
+            if (visibleOutline != null) {
+                val protectedRows = visibleOutline.subList(
+                    firstPage * CATALOG_PAGE_SIZE,
+                    ((lastPage + 1) * CATALOG_PAGE_SIZE).coerceAtMost(itemCount),
+                )
+                if (!outlineCache.retain(protectedRows, publishedEpoch)) return@collectLatest
+                for (rows in protectedRows.chunked(CATALOG_PAGE_SIZE)) {
+                    val missing = outlineCache.missing(rows)
+                    if (missing.isNotEmpty()) {
+                        val chapters = loadChapterIndices(missing.map { it.index })
+                        currentCoroutineContext().ensureActive()
+                        if (outlineCache.epoch != publishedEpoch) return@collectLatest
+                        outlineCache.store(
+                            requested = missing,
+                            loaded = chapters.filter { it.chapter.bookUrl == bookUrl }.associateBy {
+                                CatalogOutlineEntry(it.chapter.url, it.chapter.index, it.chapter.isVolume)
+                            },
+                            protectedRows = protectedRows,
+                            expectedEpoch = publishedEpoch,
+                        )
+                    }
+                }
+                return@collectLatest
+            }
             for (pageIndex in firstPage..lastPage) {
                 if (loadedPages[pageIndex] == null) {
-                    loadedPages[pageIndex] = if (visibleOutline != null) {
-                        loadChapterIndices(
-                            catalogPageIndices(visibleOutline, pageIndex * CATALOG_PAGE_SIZE, CATALOG_PAGE_SIZE)
-                        )
-                    } else loadChapterPage(
+                    loadedPages[pageIndex] = loadChapterPage(
                         query,
                         descending,
                         pageIndex * CATALOG_PAGE_SIZE,
@@ -1530,20 +1847,29 @@ private fun CatalogChapterList(
     ) {
         LazyColumn(
             state = listState,
-            modifier = Modifier
-                .fillMaxSize()
-                .background(listBackgroundColor),
-            contentPadding = if (compact) PaddingValues(bottom = 12.dp) else PaddingValues(
-                start = 12.dp, top = 6.dp, end = 12.dp, bottom = 20.dp,
+            modifier = Modifier.fillMaxSize().then(
+                if (dense) {
+                    Modifier.padding(start = 8.dp, top = 6.dp, end = 8.dp)
+                        .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
+                        .background(catalogCardColor())
+                } else Modifier.background(listBackgroundColor)
             ),
-            verticalArrangement = Arrangement.spacedBy(if (compact) 0.dp else 6.dp),
+            contentPadding = when {
+                dense -> PaddingValues(bottom = 20.dp)
+                compact -> PaddingValues(bottom = 12.dp)
+                else -> PaddingValues(start = 12.dp, top = 6.dp, end = 12.dp, bottom = 20.dp)
+            },
+            verticalArrangement = Arrangement.spacedBy(if (compact || dense) 0.dp else 6.dp),
         ) {
             items(count = itemCount, key = { visibleOutline?.getOrNull(it)?.url ?: it }) { position ->
                 val pageIndex = position / CATALOG_PAGE_SIZE
                 val pageOffset = position % CATALOG_PAGE_SIZE
-                val item = loadedPages[pageIndex]?.getOrNull(pageOffset)
+                val item = if (visibleOutline != null) {
+                    visibleOutline.getOrNull(position)?.let(outlineCache::get)
+                } else loadedPages[pageIndex]?.getOrNull(pageOffset)
                 if (item == null) {
-                    if (compact) CompactCatalogPlaceholder(mutedColor)
+                    if (dense) DenseCatalogPlaceholder(mutedColor)
+                    else if (compact) CompactCatalogPlaceholder(mutedColor)
                     else CatalogChapterPlaceholder(mutedColor)
                 } else {
                     val cached = isLocalBook || item.chapter.isVolume ||
@@ -1555,7 +1881,18 @@ private fun CatalogChapterList(
                         if (showUncachedWordCount && item.chapter.isVolume) onVolumeClick(item.chapter)
                         else onChapterClick(item.chapter)
                     }
-                    if (compact) CompactCatalogChapterRow(
+                    if (dense) DenseCatalogChapterRow(
+                        chapter = item.chapter,
+                        displayTitle = item.displayTitle,
+                        current = item.chapter.index == currentChapterIndex,
+                        cached = cached,
+                        showCacheState = showCacheState,
+                        showWordCount = showWordCount,
+                        mutedColor = mutedColor,
+                        accentColor = accentColor,
+                        volumeExpanded = volumeExpanded,
+                        onClick = click,
+                    ) else if (compact) CompactCatalogChapterRow(
                         chapter = item.chapter,
                         displayTitle = item.displayTitle,
                         current = item.chapter.index == currentChapterIndex,
@@ -1638,21 +1975,10 @@ internal fun NgCatalogChapterRow(
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (chapter.isVip) {
-                Icon(
-                    imageVector = if (chapter.isPay) {
-                        Icons.Rounded.LockOpen
-                    } else {
-                        Icons.Rounded.Lock
-                    },
-                    contentDescription = stringResource(
-                        if (chapter.isPay) {
-                            R.string.read_catalog_vip_purchased
-                        } else {
-                            R.string.read_catalog_vip_unpaid
-                        }
-                    ),
+                CatalogVipIcon(
+                    isPaid = chapter.isPay,
+                    tint = mutedColor,
                     modifier = Modifier.size(16.dp),
-                    tint = mutedColor.copy(alpha = 0.72f),
                 )
                 Spacer(Modifier.width(8.dp))
             }
@@ -1712,6 +2038,91 @@ internal fun NgCatalogChapterRow(
 }
 
 @Composable
+internal fun DenseCatalogChapterRow(
+    chapter: BookChapter,
+    displayTitle: String,
+    current: Boolean,
+    cached: Boolean,
+    showCacheState: Boolean,
+    showWordCount: Boolean,
+    mutedColor: Color,
+    accentColor: Color,
+    volumeExpanded: Boolean?,
+    onClick: () -> Unit,
+) {
+    val metadata = catalogChapterMetadata(chapter.tag, chapter.wordCount, cached)
+    val wordCount = metadata.wordCount.takeIf { showWordCount && !chapter.isVolume }
+    val chapterTag = if (chapter.isVolume) chapter.tag?.takeIf(String::isNotBlank) else metadata.description
+    Column(
+        modifier = Modifier.fillMaxWidth()
+            .clickable(onClick = onClick)
+            .semantics { selected = current },
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                .padding(horizontal = 14.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (chapter.isVip) {
+                    CatalogVipIcon(
+                        isPaid = chapter.isPay,
+                        tint = mutedColor,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                }
+                Text(
+                    text = displayTitle,
+                    modifier = Modifier.weight(1f),
+                    color = if (current) accentColor else mutedColor,
+                    fontSize = if (chapter.isVolume) 16.sp else 15.sp,
+                    fontWeight = if (chapter.isVolume) FontWeight.SemiBold else FontWeight.Normal,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (volumeExpanded != null) {
+                    Spacer(Modifier.width(8.dp))
+                    Icon(
+                        painterResource(if (volumeExpanded) R.drawable.ic_expand_more else R.drawable.ic_chevron_right_20),
+                        contentDescription = stringResource(if (volumeExpanded)
+                            R.string.read_catalog_collapse_volume else R.string.read_catalog_expand_volume),
+                        modifier = Modifier.size(20.dp), tint = mutedColor,
+                    )
+                } else {
+                    if (wordCount != null) {
+                        Spacer(Modifier.width(8.dp))
+                        Text(wordCount, color = mutedColor, fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium, maxLines = 1)
+                    }
+                    if (showCacheState && !cached && !chapter.isVolume) {
+                        Spacer(Modifier.width(6.dp))
+                        Icon(painterResource(R.drawable.ic_outline_cloud_24), contentDescription = null,
+                            modifier = Modifier.size(16.dp), tint = mutedColor.copy(alpha = 0.55f))
+                    }
+                }
+            }
+            if (chapterTag != null) {
+                Spacer(Modifier.height(3.dp))
+                Text(chapterTag, color = mutedColor.copy(alpha = 0.78f), fontSize = 12.sp,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+        HorizontalDivider(Modifier.padding(horizontal = 14.dp), thickness = 0.5.dp,
+            color = mutedColor.copy(alpha = 0.10f))
+    }
+}
+
+@Composable
+private fun DenseCatalogPlaceholder(mutedColor: Color) {
+    Box(Modifier.fillMaxWidth().height(48.dp).padding(horizontal = 14.dp),
+        contentAlignment = Alignment.CenterStart) {
+        Box(Modifier.fillMaxWidth(0.58f).height(12.dp).clip(CircleShape)
+            .background(mutedColor.copy(alpha = 0.08f)))
+    }
+}
+
+@Composable
 private fun CompactCatalogChapterRow(
     chapter: BookChapter,
     displayTitle: String,
@@ -1725,16 +2136,18 @@ private fun CompactCatalogChapterRow(
     volumeExpanded: Boolean?,
     onClick: () -> Unit,
 ) {
-    val activeColor = Color(NgTheme.colors.secondary)
+    val activeColor = Color(NgTheme.colors.primary)
     val wordCount = if (showWordCount && !chapter.isVolume) {
         catalogChapterMetadata(chapter.tag, chapter.wordCount, cached).wordCount
     } else null
     Row(
         modifier = Modifier.fillMaxWidth().height(52.dp)
-            .background(if (current) activeColor.copy(alpha = 0.09f) else Color.Transparent)
+            .drawBehind {
+                if (current) drawRect(activeColor, size = Size(3.dp.toPx(), size.height))
+            }
             .clickable(onClick = onClick)
             .semantics { selected = current }
-            .padding(start = if (isVolumeChild) 32.dp else 18.dp, end = 18.dp),
+            .padding(start = if (isVolumeChild) 26.dp else 12.dp, end = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (volumeExpanded != null) {
@@ -1747,11 +2160,10 @@ private fun CompactCatalogChapterRow(
             Spacer(Modifier.width(8.dp))
         }
         if (chapter.isVip) {
-            Icon(
-                imageVector = if (chapter.isPay) Icons.Rounded.LockOpen else Icons.Rounded.Lock,
-                contentDescription = stringResource(if (chapter.isPay)
-                    R.string.read_catalog_vip_purchased else R.string.read_catalog_vip_unpaid),
-                modifier = Modifier.size(14.dp), tint = mutedColor,
+            CatalogVipIcon(
+                isPaid = chapter.isPay,
+                tint = mutedColor,
+                modifier = Modifier.size(14.dp),
             )
             Spacer(Modifier.width(6.dp))
         }
@@ -1759,7 +2171,11 @@ private fun CompactCatalogChapterRow(
             displayTitle, modifier = Modifier.weight(1f),
             color = if (current) activeColor else contentColor,
             fontSize = 14.sp,
-            fontWeight = if (chapter.isVolume || current) FontWeight.Medium else FontWeight.Normal,
+            fontWeight = when {
+                current -> FontWeight.Bold
+                chapter.isVolume -> FontWeight.Medium
+                else -> FontWeight.Normal
+            },
             maxLines = 1, overflow = TextOverflow.Ellipsis,
         )
         if (wordCount != null) {
@@ -1777,7 +2193,7 @@ private fun CompactCatalogChapterRow(
 
 @Composable
 private fun CompactCatalogPlaceholder(mutedColor: Color) {
-    Box(Modifier.fillMaxWidth().height(52.dp).padding(horizontal = 20.dp),
+    Box(Modifier.fillMaxWidth().height(52.dp).padding(horizontal = 12.dp),
         contentAlignment = Alignment.CenterStart) {
         Box(Modifier.fillMaxWidth(0.62f).height(12.dp).clip(CircleShape)
             .background(mutedColor.copy(alpha = 0.08f)))
@@ -1932,7 +2348,7 @@ private fun CompactCatalogBookmarkRow(
             modifier = Modifier.fillMaxWidth()
                 .combinedClickable(onClick = onClick,
                     onLongClickLabel = stringResource(R.string.delete), onLongClick = onLongClick)
-                .padding(start = 20.dp, top = 11.dp, end = 18.dp, bottom = 10.dp),
+                .padding(start = 12.dp, top = 11.dp, end = 12.dp, bottom = 10.dp),
         ) {
             Text(bookmark.chapterName, color = contentColor, fontSize = 14.sp,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -1944,7 +2360,7 @@ private fun CompactCatalogBookmarkRow(
             }
         }
         if (deleteConfirmationVisible) {
-            Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp),
+            Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 Text(stringResource(R.string.read_catalog_delete_bookmark_confirmation),
                     modifier = Modifier.weight(1f), color = mutedColor, fontSize = 11.sp,
@@ -1957,7 +2373,7 @@ private fun CompactCatalogBookmarkRow(
             Row(
                 modifier = Modifier.fillMaxWidth().height(28.dp)
                     .clickable(onClick = onNoteToggle)
-                    .padding(start = 20.dp, end = 18.dp),
+                    .padding(start = 12.dp, end = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(stringResource(R.string.bookmark_note),
@@ -1972,12 +2388,12 @@ private fun CompactCatalogBookmarkRow(
             }
             if (noteExpanded) {
                 Text(bookmark.content.trim(),
-                    modifier = Modifier.padding(start = 20.dp, end = 18.dp, bottom = 8.dp),
+                    modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 8.dp),
                     color = contentColor, fontSize = 12.sp, lineHeight = 16.sp)
             }
         }
         HorizontalDivider(
-            modifier = Modifier.padding(start = 20.dp, end = 18.dp),
+            modifier = Modifier.padding(start = 12.dp, end = 12.dp),
             thickness = 0.5.dp, color = mutedColor.copy(alpha = 0.14f),
         )
     }

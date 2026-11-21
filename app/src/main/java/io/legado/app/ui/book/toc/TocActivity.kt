@@ -45,6 +45,13 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+internal fun TocUiState.withBookSnapshot(book: Book): TocUiState = copy(
+    book = book.copy(),
+    reverseToc = book.getReverseToc(),
+    splitLongChapter = book.getSplitLongChapter(),
+    isLocalTxt = book.isLocalTxt,
+)
+
 /** 目录／书签。页面渲染使用 Compose，业务协议沿用原实现。 */
 class TocActivity : VMBaseActivity<ComposeActivityBinding, TocViewModel>(
     toolBarTheme = Theme.Dark,
@@ -87,18 +94,23 @@ class TocActivity : VMBaseActivity<ComposeActivityBinding, TocViewModel>(
         )
         binding.composeView.setContent {
             NgAppTheme {
-                TocScreen(state = uiState, onEvent = ::handleUiEvent)
+                TocScreen(state = uiState.copy(reversing = viewModel.isReversing), onEvent = ::handleUiEvent)
             }
         }
     }
 
     private fun onBookChanged(book: Book) {
-        uiState = uiState.copy(
-            book = book.copy(),
-            splitLongChapter = book.getSplitLongChapter(),
-            isLocalTxt = book.isLocalTxt,
-        )
+        uiState = uiState.withBookSnapshot(book)
         loadCachedFiles(book)
+        if (viewModel.chapterOrderChanged) {
+            setResult(RESULT_OK, Intent().apply {
+                putExtra("index", book.durChapterIndex)
+                putExtra("chapterPos", book.durChapterPos)
+                putExtra("chapterChanged", true)
+                putExtra("durVolumeIndex", book.durVolumeIndex)
+                putExtra("chapterInVolumeIndex", book.chapterInVolumeIndex)
+            })
+        }
         if (uiState.selectedTab == TOC_TAB_BOOKMARKS) {
             observeBookmarks()
         } else {
@@ -109,6 +121,7 @@ class TocActivity : VMBaseActivity<ComposeActivityBinding, TocViewModel>(
     private fun handleUiEvent(event: TocUiEvent) {
         when (event) {
             TocUiEvent.Back -> onBackPressedDispatcher.onBackPressed()
+            TocUiEvent.ToggleSort -> uiState = uiState.copy(catalogDescending = !uiState.catalogDescending)
             is TocUiEvent.TabChange -> changeTab(event.tab)
             is TocUiEvent.SearchExpandedChange -> {
                 if (event.expanded) {
@@ -167,6 +180,7 @@ class TocActivity : VMBaseActivity<ComposeActivityBinding, TocViewModel>(
                 .coerceAtLeast(0)
             uiState = uiState.copy(
                 chapters = chapters.map(::TocChapterUiItem),
+                totalChapterCount = if (query.isBlank()) chapters.size else uiState.totalChapterCount,
                 chapterScrollIndex = scrollIndex,
                 chapterScrollToken = uiState.chapterScrollToken + 1,
             )
@@ -292,14 +306,7 @@ class TocActivity : VMBaseActivity<ComposeActivityBinding, TocViewModel>(
     }
 
     private fun reverseToc() {
-        viewModel.reverseToc { book ->
-            uiState = uiState.copy(book = book.copy())
-            loadChapters()
-            setResult(RESULT_OK, Intent().apply {
-                putExtra("index", book.durChapterIndex)
-                putExtra("chapterPos", 0)
-            })
-        }
+        viewModel.reverseToc()
     }
 
     override fun onTocRegexDialogResult(tocRegex: String) {
@@ -324,7 +331,9 @@ class TocActivity : VMBaseActivity<ComposeActivityBinding, TocViewModel>(
     }
 
     private fun openChapter(bookChapter: BookChapter) {
+        if (viewModel.isReversing) return
         val book = viewModel.bookData.value ?: return
+        val keepChapterPosition = viewModel.chapterOrderChanged && bookChapter.index == book.durChapterIndex
         if (book.isVideo) {
             val chapters = fullChapterList.ifEmpty { uiState.chapters.map { it.chapter } }
             val volumes = chapters.filter(BookChapter::isVolume)
@@ -350,25 +359,29 @@ class TocActivity : VMBaseActivity<ComposeActivityBinding, TocViewModel>(
                 RESULT_OK,
                 Intent()
                     .putExtra("index", bookChapter.index)
-                    .putExtra("chapterChanged", bookChapter.index != book.durChapterIndex)
+                    .putExtra("chapterChanged", viewModel.chapterOrderChanged || bookChapter.index != book.durChapterIndex)
                     .putExtra("durVolumeIndex", durVolumeIndex)
-                    .putExtra("chapterInVolumeIndex", chapterInVolumeIndex),
+                    .putExtra("chapterInVolumeIndex", chapterInVolumeIndex)
+                    .apply { if (keepChapterPosition) putExtra("chapterPos", book.durChapterPos) },
             )
         } else {
             setResult(
                 RESULT_OK,
                 Intent()
                     .putExtra("index", bookChapter.index)
-                    .putExtra("chapterChanged", bookChapter.index != book.durChapterIndex),
+                    .putExtra("chapterChanged", viewModel.chapterOrderChanged || bookChapter.index != book.durChapterIndex)
+                    .apply { if (keepChapterPosition) putExtra("chapterPos", book.durChapterPos) },
             )
         }
         finish()
     }
 
     private fun openBookmark(bookmark: Bookmark) {
+        if (viewModel.isReversing) return
         setResult(RESULT_OK, Intent().apply {
             putExtra("index", bookmark.chapterIndex)
             putExtra("chapterPos", if (bookmark.isTextHighlight) 0 else bookmark.chapterPos)
+            putExtra("chapterChanged", viewModel.chapterOrderChanged)
             if (bookmark.isTextHighlight) putExtra("bookmarkTime", bookmark.time)
         })
         finish()

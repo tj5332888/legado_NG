@@ -9,7 +9,11 @@ import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.BookChapter
 import io.legado.app.data.entities.BookSource
 import io.legado.app.exception.ConcurrentException
+import io.legado.app.exception.NoStackTraceException
 import io.legado.app.help.book.BookHelp
+import io.legado.app.help.book.completeChapterCache
+import io.legado.app.help.book.hasCompleteChapterImages
+import io.legado.app.help.book.hasUsableChapterCacheContent
 import io.legado.app.help.book.isAudio
 import io.legado.app.help.book.isLocal
 import io.legado.app.help.book.menuCapabilities
@@ -51,6 +55,18 @@ object CacheBook {
 
     private val workingState = MutableStateFlow(true)
     private val mutex = Mutex()
+
+    /** Reordering must not discard pending downloads or publish under an old chapter index. */
+    @Synchronized
+    internal fun <T> withIdleBook(bookUrl: String, block: () -> T): T {
+        val model = cacheBookMap[bookUrl] ?: return block()
+        return synchronized(model) {
+            if (model.isRun() || model.waitingRetry) {
+                throw NoStackTraceException("正在缓存，请完成后再调整目录顺序")
+            }
+            block()
+        }
+    }
 
     @Synchronized
     fun getOrCreate(bookUrl: String): CacheBookModel? {
@@ -272,7 +288,8 @@ object CacheBook {
         private val downloadCompletions = hashMapOf<Int, CompletableDeferred<Unit>>()
         private val tasks = CompositeCoroutine()
         private var isStopped = false
-        private var waitingRetry = false
+        internal var waitingRetry = false
+            private set
         private var isLoading = false
 
         /** 用户单独暂停这本书;不影响其它书。 */
@@ -456,20 +473,25 @@ object CacheBook {
                 downloadAudio(scope, context, chapter)
                 return
             }
-            if (BookHelp.hasImageContent(book, chapter)) {
+            val requestBook = book
+            val requestSource = bookSource
+            val cachedContent = BookHelp.getContent(requestBook, chapter)
+            if (hasCompleteChapterImages(requestBook, chapter, cachedContent)) {
                 waitDownloadSet.remove(chapterIndex)
                 return
             }
             waitDownloadSet.remove(chapterIndex)
             onDownloadSet.add(chapterIndex)
-            if (BookHelp.hasContent(book, chapter)) {
-                Coroutine.async(scope, context, executeContext = context) {
-                    BookHelp.getContent(book, chapter)?.let {
-                        BookHelp.saveImages(bookSource, book, chapter, it, 1)
-                    }
+            if (hasUsableChapterCacheContent(requestBook, cachedContent)) {
+                Coroutine.async(
+                    scope, context, start = CoroutineStart.LAZY, executeContext = context
+                ) {
+                    completeChapterCache(requestSource, requestBook, chapter, cachedContent!!)
                 }.onSuccess {
+                    currentCoroutineContext().ensureActive()
                     onSuccess(chapter)
                 }.onError {
+                    if (it is CancellationException) throw it
                     onPreError(chapter, it)
                     //出错后指数退避重试,避免连续请求触发源站限制
                     delay(cacheRetryDelay(chapter, it))
@@ -478,31 +500,39 @@ object CacheBook {
                     onCancel(chapterIndex)
                 }.onFinally {
                     onFinally()
-                }.let {
-                    tasks.add(it)
-                }
+                }.apply {
+                    tasks.add(this)
+                }.start()
                 return
             }
-            val requestBook = book
-            val sourceKey = bookSource.getKey()
+            var fetchedContent: String? = null
+            val sourceKey = requestSource.getKey()
             downloadGenerations[chapter.index] = generation
             // 节奏等待放在协程体内执行,此时不持有本对象的锁,
             // 因此不会阻塞 startProcessJob 对 isLoading/hasWaitingDownload 的轮询。
             Coroutine.async(scope, context, start = CoroutineStart.LAZY, executeContext = context) {
                 ReadingPaceController.withPacedTurn(sourceKey) {
-                    WebBook.getContentAwait(bookSource, requestBook, chapter).also {
+                    WebBook.getContentAwait(requestSource, requestBook, chapter).also {
                         ReadingPaceController.onContentFetched(sourceKey, it.length)
                     }
                 }
             }.onSuccess { content ->
+                fetchedContent = content
+                completeChapterCache(requestSource, requestBook, chapter, content)
+                currentCoroutineContext().ensureActive()
                 onSuccess(chapter)
                 downloadFinish(requestBook, generation, chapter, content)
             }.onError {
+                if (it is CancellationException) throw it
                 onPreError(chapter, it)
                 //出错后指数退避重试,避免连续请求触发源站限制
                 delay(cacheRetryDelay(chapter, it))
                 onPostError(chapter, it)
-                downloadFinish(requestBook, generation, chapter, "获取正文失败\n${it.localizedMessage}")
+                // 补图失败只影响缓存任务，不能用正文错误覆盖已获取的正常内容。
+                downloadFinish(
+                    requestBook, generation, chapter,
+                    fetchedContent ?: "获取正文失败\n${it.localizedMessage}"
+                )
             }.onCancel {
                 onCancel(chapterIndex)
             }.onFinally {

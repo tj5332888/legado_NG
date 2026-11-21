@@ -45,6 +45,16 @@ internal object ReadFloatingPalette {
     private const val ENHANCED_TOP_TINT_FRACTION = 0.22f
     private const val ENHANCED_BOTTOM_TINT_FRACTION = 0.50f
 
+    private data class SemanticMemo(
+        val snapshot: NgThemeSnapshot,
+        val strength: Int?,
+        val style: ReadFloatingColorStyle,
+        val colors: ReadFloatingSemanticColors,
+    )
+
+    @Volatile
+    private var semanticMemo: SemanticMemo? = null
+
     fun applySeed(
         base: NgThemeSnapshot,
         @ColorInt seed: Int,
@@ -129,6 +139,12 @@ internal object ReadFloatingPalette {
         primaryStrengthPercent: Int? = null,
         colorStyle: ReadFloatingColorStyle = ReadFloatingColorStyle.VIBRANT,
     ): ReadFloatingSemanticColors {
+        // These snapshots and results contain only immutable values. Publish one
+        // complete entry so callers on different threads cannot observe a partial key.
+        semanticMemo?.let { memo ->
+            if (memo.snapshot == snapshot && memo.strength == primaryStrengthPercent && memo.style == colorStyle)
+                return memo.colors
+        }
         val surfaces = resolveSurfaceColors(snapshot, primaryStrengthPercent)
         val backgrounds = intArrayOf(surfaces.top, surfaces.bottom)
         val colors = snapshot.colors
@@ -194,7 +210,7 @@ internal object ReadFloatingPalette {
             onIndicator = NgColorMath.contentColorFor(indicator),
             action = action,
             outline = outline,
-        )
+        ).also { semanticMemo = SemanticMemo(snapshot, primaryStrengthPercent, colorStyle, it) }
     }
 
     fun applySemanticRoles(
@@ -232,6 +248,18 @@ internal object ReadFloatingPalette {
                 onTopBar = semantic.content,
                 selectedContainer = indicatorContainer,
             )
+        )
+    }
+
+    /** Keep destructive text readable against both ends of the reading dialog gradient. */
+    @ColorInt
+    fun resolveDangerTextColor(snapshot: NgThemeSnapshot, primaryStrengthPercent: Int): Int {
+        val surfaces = resolveSurfaceColors(snapshot, primaryStrengthPercent)
+        return findContrastingTone(
+            preferred = snapshot.colors.error,
+            backgrounds = intArrayOf(surfaces.top, surfaces.bottom),
+            contrastThreshold = TEXT_MIN_CONTRAST,
+            preserveChroma = true,
         )
     }
 

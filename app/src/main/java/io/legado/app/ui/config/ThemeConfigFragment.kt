@@ -1,6 +1,7 @@
 package io.legado.app.ui.config
 
 import android.net.Uri
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.view.View
@@ -21,8 +22,7 @@ import io.legado.app.help.config.BookshelfFloatingDockConfig
 import io.legado.app.help.config.BookshelfFloatingDockSearchPosition
 import io.legado.app.help.config.BookshelfTopBarStyle
 import io.legado.app.help.config.FloatingBottomBarConfig
-import io.legado.app.help.config.ListeningCartoonType
-import io.legado.app.help.config.NgDynamicSceneTheme
+import io.legado.app.help.config.NgEffectThemeSelection
 import io.legado.app.help.config.NgDrawerProfileStore
 import io.legado.app.help.config.NgThemeDrawerAssets
 import io.legado.app.help.config.NgThemeDrawerProfile
@@ -32,6 +32,7 @@ import io.legado.app.help.config.NgSoftGradientLightFieldPreset
 import io.legado.app.help.config.NgSoftGradientTheme
 import io.legado.app.help.config.NgThemeModeGroup
 import io.legado.app.help.config.NgThemeModeStore
+import io.legado.app.help.config.NgThemeLibraryStore
 import io.legado.app.help.config.NgThemePresentationMode
 import io.legado.app.help.config.NgVisualSystem
 import io.legado.app.help.config.NgVisualSystemStore
@@ -41,6 +42,8 @@ import io.legado.app.help.http.newCallResponse
 import io.legado.app.help.http.okHttpClient
 import io.legado.app.model.analyzeRule.AnalyzeUrl
 import io.legado.app.ui.design.theme.NgAppTheme
+import io.legado.app.ui.main.HOME_WIDGET_EDIT_REQUEST
+import io.legado.app.ui.main.MainActivity
 import io.legado.app.utils.FileUtils
 import io.legado.app.utils.MD5Utils
 import io.legado.app.utils.SelectFileContract
@@ -155,7 +158,6 @@ class ThemeConfigFragment : BaseFragment(R.layout.fragment_theme_config) {
                         onSoftGradientColorSelected = ::selectSoftGradientColor,
                         onSoftGradientCustomColorSelected = ::selectSoftGradientCustomColor,
                         onSoftGradientLightFieldSelected = ::selectSoftGradientLightField,
-                        onDynamicScenePresetSelected = ::selectDynamicScenePreset,
                         onVisualSystemSelected = ::setVisualSystem,
                         onLauncherIconClick = ::showLauncherIconSelection,
                         onFloatingBottomBarChanged = ::setFloatingBottomBar,
@@ -186,6 +188,12 @@ class ThemeConfigFragment : BaseFragment(R.layout.fragment_theme_config) {
                         onOnlyUpdateReadChanged = ::setOnlyUpdateRead,
                         onDefaultToReadChanged = ::setDefaultToRead,
                         onShowHomeChanged = ::setShowHome,
+                        onManageHome = {
+                            startActivity<MainActivity> {
+                                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                                putExtra(HOME_WIDGET_EDIT_REQUEST, true)
+                            }
+                        },
                         onShowDiscoveryChanged = ::setShowDiscovery,
                         onShowRssChanged = ::setShowRss,
                         onDefaultHomePageSelected = ::setDefaultHomePage,
@@ -285,11 +293,12 @@ class ThemeConfigFragment : BaseFragment(R.layout.fragment_theme_config) {
             softGradientColor = NgSoftGradientTheme.colorPreset(requireContext()),
             softGradientCustomColor = NgSoftGradientTheme.customColor(requireContext()),
             softGradientLightField = NgSoftGradientTheme.lightFieldPreset(requireContext()),
-            dynamicScenePreset = NgDynamicSceneTheme.current(requireContext()),
+            effectThemeName = NgEffectThemeSelection.current(requireContext())?.name,
+            installedThemeCount = NgThemeLibraryStore.current(requireContext()).savedThemes.size,
             visualSystem = NgVisualSystemStore.current(requireContext()),
             showLauncherIcon = Build.VERSION.SDK_INT >= 26,
             launcherIconRes = launcherIconResource(launcherIcon),
-            floatingBottomBar = getPrefBoolean(PreferKey.useFloatingBottomBar, false),
+            floatingBottomBar = AppConfig.useFloatingBottomBar,
             floatingBottomBarBottomDistancePx =
                 FloatingBottomBarConfig.resolveBottomDistancePx(
                     storedDistancePx = AppConfig.floatingBottomBarBottomDistancePx,
@@ -342,28 +351,18 @@ class ThemeConfigFragment : BaseFragment(R.layout.fragment_theme_config) {
     }
 
     private fun backgroundSummary(imageKey: String, blurKey: String): String {
-        val path = getPrefString(imageKey).takeUnless { it.isNullOrBlank() }
-            ?: return getString(R.string.ng_theme_background_none)
-        val name = path.substringAfterLast('/').substringAfterLast('\\')
+        if (getPrefString(imageKey).isNullOrBlank()) return getString(R.string.ng_theme_background_none)
         return getString(
             R.string.ng_theme_background_summary,
-            name,
+            getString(R.string.ng_theme_background_set),
             getPrefInt(blurKey, 0)
         )
     }
 
     private fun selectThemeModeGroup(group: NgThemeModeGroup) {
         if (group == screenState.themeModeGroup) return
-        val presentationMode = if (group == NgThemeModeGroup.STANDARD) {
-            NgThemePresentationMode.STANDARD
-        } else {
-            screenState.internalThemeMode
-        }
-        screenState = screenState.copy(
-            themeModeGroup = group,
-            presentationMode = presentationMode,
-        )
         NgThemeModeStore.activateGroup(requireContext(), group)
+        refreshContent()
     }
 
     private fun selectStandardThemeMode(mode: String) {
@@ -373,12 +372,8 @@ class ThemeConfigFragment : BaseFragment(R.layout.fragment_theme_config) {
         ) {
             return
         }
-        screenState = screenState.copy(
-            themeModeGroup = NgThemeModeGroup.STANDARD,
-            presentationMode = NgThemePresentationMode.STANDARD,
-            standardThemeMode = mode,
-        )
         NgThemeModeStore.activateStandard(requireContext(), mode)
+        refreshContent()
     }
 
     private fun selectInternalThemeMode(mode: NgThemePresentationMode) {
@@ -427,11 +422,6 @@ class ThemeConfigFragment : BaseFragment(R.layout.fragment_theme_config) {
         NgSoftGradientTheme.selectLightField(requireContext(), preset)
     }
 
-    private fun selectDynamicScenePreset(preset: ListeningCartoonType) {
-        if (preset == screenState.dynamicScenePreset) return
-        screenState = screenState.copy(dynamicScenePreset = preset)
-        NgDynamicSceneTheme.select(requireContext(), preset)
-    }
 
     private fun setVisualSystem(visualSystem: NgVisualSystem) {
         if (visualSystem == screenState.visualSystem) return
@@ -791,6 +781,9 @@ class ThemeConfigFragment : BaseFragment(R.layout.fragment_theme_config) {
         } else {
             PreferKey.bgImageBlurring
         }
+        val changed = getPrefString(imageKey).takeUnless { it.isNullOrBlank() } != editorState.path ||
+            getPrefInt(blurKey, 0) != editorState.blur
+        val wasFoundation = NgThemeModeStore.isCustomFoundation(requireContext())
         editorState.path.takeUnless { it.isNullOrBlank() }?.let { path ->
             putPrefString(imageKey, path)
         } ?: removePref(imageKey)
@@ -803,7 +796,12 @@ class ThemeConfigFragment : BaseFragment(R.layout.fragment_theme_config) {
             }
         )
         backgroundEditorState = null
-        onBackgroundChanged(editorState.dark)
+        if (wasFoundation && (changed || !editorState.path.isNullOrBlank())) {
+            NgThemeModeStore.activateManualAppearance(requireContext())
+            refreshContent()
+        } else {
+            onBackgroundChanged(editorState.dark)
+        }
     }
 
     private fun onBackgroundChanged(isNightTheme: Boolean) {

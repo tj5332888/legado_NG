@@ -4,9 +4,7 @@ import android.annotation.SuppressLint
 import android.content.pm.ActivityInfo
 import android.os.Build
 import android.os.Bundle
-import android.view.KeyEvent
-import android.view.View
-import android.view.WindowInsets
+import android.view.Window
 import android.view.WindowManager
 import androidx.activity.viewModels
 import androidx.compose.runtime.getValue
@@ -22,6 +20,7 @@ import io.legado.app.constant.PreferKey
 import io.legado.app.databinding.ActivityBookReadBinding
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.config.LocalConfig
+import io.legado.app.help.config.matchesPageKey
 import io.legado.app.help.config.ReadBookConfig
 import io.legado.app.lib.theme.bottomBackground
 import io.legado.app.model.CacheBook
@@ -55,6 +54,7 @@ abstract class BaseReadBookActivity :
     override val viewModel by viewModels<ReadBookViewModel>()
     protected val menuLayoutIsVisible
         get() = bottomDialog > 0 || binding.readMenu.isVisible || binding.searchMenu.bottomMenuVisible
+    private var catalogStatusBarHidden = false
     var bottomDialog = 0
         set(value) {
             if (field != value) {
@@ -153,28 +153,12 @@ abstract class BaseReadBookActivity :
         toolBarHide: Boolean = true,
         useBgMeanColor: Boolean = false
     ) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            window.insetsController?.run {
-                if (AppConfig.hideSystemNavigationBar) {
-                    hide(WindowInsets.Type.navigationBars())
-                } else {
-                    show(WindowInsets.Type.navigationBars())
-                }
-                if (toolBarHide && ReadBookConfig.hideStatusBar) {
-                    hide(WindowInsets.Type.statusBars())
-                } else {
-                    show(WindowInsets.Type.statusBars())
-                }
-            }
-        }
-        upSystemUiVisibilityO(isInMultiWindow, toolBarHide)
+        applySystemBarVisibility(window, isInMultiWindow, toolBarHide)
         if (toolBarHide) {
             setLightStatusBar(ReadBookConfig.durConfig.curStatusIconDark())
         } else {
-            val followsPageColor = AppConfig.readBarStyleFollowPage &&
-                ReadBookConfig.durConfig.curBgType() == 0 || useBgMeanColor
             setLightStatusBar(
-                if (followsPageColor) {
+                if (useBgMeanColor) {
                     ColorUtils.isColorLight(ReadBookConfig.bgMeanColor)
                 } else {
                     ReadDrawerStyle.themeSnapshot(this).systemBars.darkStatusBarIcons
@@ -183,25 +167,26 @@ abstract class BaseReadBookActivity :
         }
     }
 
-    @Suppress("DEPRECATION")
-    private fun upSystemUiVisibilityO(
-        isInMultiWindow: Boolean,
-        toolBarHide: Boolean = true
+    internal fun applySystemBarVisibility(
+        targetWindow: Window,
+        isInMultiWindow: Boolean = this.isInMultiWindow,
+        toolBarHide: Boolean = !menuLayoutIsVisible,
+        hideStatusBarForOverlay: Boolean = catalogStatusBarHidden,
     ) {
-        var flag = (View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                or View.SYSTEM_UI_FLAG_IMMERSIVE
-                or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY)
-        if (!isInMultiWindow) {
-            flag = flag or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-        }
-        if (AppConfig.hideSystemNavigationBar) {
-            flag = flag or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-            flag = flag or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-        }
-        if (ReadBookConfig.hideStatusBar && toolBarHide) {
-            flag = flag or View.SYSTEM_UI_FLAG_FULLSCREEN
-        }
-        window.decorView.systemUiVisibility = flag
+        applyReadSystemBarVisibility(
+            window = targetWindow,
+            isInMultiWindow = isInMultiWindow,
+            toolBarHide = toolBarHide,
+            hideStatusBar = ReadBookConfig.hideStatusBar,
+            hideNavigationBar = AppConfig.hideSystemNavigationBar,
+            hideStatusBarForOverlay = hideStatusBarForOverlay,
+        )
+    }
+
+    internal fun setCatalogStatusBarHidden(hidden: Boolean) {
+        if (catalogStatusBarHidden == hidden) return
+        catalogStatusBarHidden = hidden
+        upSystemUiVisibility(isInMultiWindow, !menuLayoutIsVisible, bottomDialog > 0)
     }
 
     override fun upNavigationBarColor() {
@@ -300,19 +285,9 @@ abstract class BaseReadBookActivity :
         }
     }
 
-    fun isPrevKey(keyCode: Int): Boolean {
-        if (keyCode == KeyEvent.KEYCODE_UNKNOWN) {
-            return false
-        }
-        val prevKeysStr = getPrefString(PreferKey.prevKeys)
-        return prevKeysStr?.split(",")?.contains(keyCode.toString()) ?: false
-    }
+    fun isPrevKey(keyCode: Int): Boolean =
+        matchesPageKey(getPrefString(PreferKey.prevKeys), keyCode)
 
-    fun isNextKey(keyCode: Int): Boolean {
-        if (keyCode == KeyEvent.KEYCODE_UNKNOWN) {
-            return false
-        }
-        val nextKeysStr = getPrefString(PreferKey.nextKeys)
-        return nextKeysStr?.split(",")?.contains(keyCode.toString()) ?: false
-    }
+    fun isNextKey(keyCode: Int): Boolean =
+        matchesPageKey(getPrefString(PreferKey.nextKeys), keyCode)
 }

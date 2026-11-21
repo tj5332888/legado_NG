@@ -3,6 +3,9 @@ package io.legado.app.ui.book.toc
 
 import android.app.Application
 import android.net.Uri
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.MutableLiveData
 import io.legado.app.R
 import io.legado.app.base.BaseViewModel
@@ -14,6 +17,7 @@ import io.legado.app.data.entities.Bookmark
 import io.legado.app.exception.NoStackTraceException
 import io.legado.app.model.ReadBook
 import io.legado.app.model.localBook.LocalBook
+import io.legado.app.help.book.setBookChapterOrderReversed
 import io.legado.app.help.book.simulatedTotalChapterNum
 import io.legado.app.utils.FileDoc
 import io.legado.app.utils.GSON
@@ -28,6 +32,10 @@ import kotlinx.coroutines.withContext
 class TocViewModel(application: Application) : BaseViewModel(application) {
     var bookUrl: String = ""
     var bookData = MutableLiveData<Book>()
+    var isReversing by mutableStateOf(false)
+        private set
+    var chapterOrderChanged = false
+        private set
 
     fun initBook(bookUrl: String) {
         this.bookUrl = bookUrl
@@ -55,19 +63,19 @@ class TocViewModel(application: Application) : BaseViewModel(application) {
         }
     }
 
-    fun reverseToc(success: (book: Book) -> Unit) {
+    fun reverseToc(book: Book? = bookData.value) {
+        if (isReversing || book == null) return
+        val reversed = !book.getReverseToc()
+        isReversing = true
         execute {
-            bookData.value?.apply {
-                setReverseToc(!getReverseToc())
-                val toc = appDb.bookChapterDao.getChapterList(bookUrl)
-                val newToc = toc.reversed()
-                newToc.forEachIndexed { index, bookChapter ->
-                    bookChapter.index = index
-                }
-                appDb.bookChapterDao.insert(*newToc.toTypedArray())
-            }
+            setBookChapterOrderReversed(book.bookUrl, reversed)
         }.onSuccess {
-            it?.let(success)
+            chapterOrderChanged = true
+            bookData.value = it
+        }.onError {
+            AppLog.put("目录反序失败\n${it.localizedMessage}", it, true)
+        }.onFinally {
+            isReversing = false
         }
     }
 

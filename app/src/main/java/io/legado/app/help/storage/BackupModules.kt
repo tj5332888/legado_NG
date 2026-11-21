@@ -3,7 +3,6 @@ package io.legado.app.help.storage
 import io.legado.app.constant.PreferKey
 import io.legado.app.help.config.ReadBookConfig
 import io.legado.app.help.config.ReadHighlightRuleStore
-import io.legado.app.help.config.ThemeConfig
 import io.legado.app.help.DirectLinkUpload
 import io.legado.app.model.BookCover
 import io.legado.app.utils.defaultSharedPreferences
@@ -16,7 +15,7 @@ internal enum class BackupModule(val id: String, val title: String, val summary:
     RSS("rss", "订阅", "订阅源与收藏"),
     READER("reader", "阅读设置", "阅读预设、高亮规则及关联图片和字体"),
     APPEARANCE("appearance", "外观与布局", "主题、界面布局、背景与界面字体"),
-    COVERS("covers", "封面", "封面规则、默认封面与封面相册"),
+    COVERS("covers", "封面", "自定义封面、封面规则、默认封面与封面相册"),
     OTHER("other", "其它设置", "通用设置、服务器、搜索历史与视频设置"),
 }
 
@@ -38,7 +37,6 @@ internal object BackupModules {
         "rssSources.json", "rssStar.json" -> BackupModule.RSS
         ReadBookConfig.configFileName, ReadBookConfig.shareConfigFileName,
         ReadHighlightRuleStore.fileName -> BackupModule.READER
-        ThemeConfig.configFileName -> BackupModule.APPEARANCE
         BookCover.configFileName -> BackupModule.COVERS
         DirectLinkUpload.ruleFileName -> BackupModule.OTHER
         else -> BackupModule.OTHER

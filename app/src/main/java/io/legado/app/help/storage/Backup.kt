@@ -14,7 +14,6 @@ import io.legado.app.help.config.AppConfig
 import io.legado.app.help.config.LocalConfig
 import io.legado.app.help.config.ReadBookConfig
 import io.legado.app.help.config.ReadHighlightRuleStore
-import io.legado.app.help.config.ThemeConfig
 import io.legado.app.help.coroutine.Coroutine
 import io.legado.app.model.BookCover
 import io.legado.app.utils.FileUtils
@@ -25,7 +24,6 @@ import io.legado.app.utils.createFolderIfNotExist
 import io.legado.app.utils.defaultSharedPreferences
 import io.legado.app.utils.externalFiles
 import io.legado.app.utils.getFile
-import io.legado.app.utils.getSharedPreferences
 import io.legado.app.utils.isContentScheme
 import io.legado.app.utils.normalizeFileName
 import io.legado.app.utils.openOutputStream
@@ -46,7 +44,6 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Callable
 import java.util.concurrent.TimeUnit
-import androidx.core.content.edit
 import io.legado.app.model.VideoPlay.VIDEO_PREF_NAME
 
 /**
@@ -83,7 +80,6 @@ object Backup {
             DirectLinkUpload.ruleFileName,
             ReadBookConfig.configFileName,
             ReadBookConfig.shareConfigFileName,
-            ThemeConfig.configFileName,
             ReadHighlightRuleStore.fileName,
             BookCover.configFileName,
             "config.xml",
@@ -192,10 +188,6 @@ object Backup {
             FileUtils.createFileIfNotExist(backupPath + File.separator + ReadHighlightRuleStore.fileName)
                 .writeText(it)
         }
-        GSON.toJson(ThemeConfig.configList).let {
-            FileUtils.createFileIfNotExist(backupPath + File.separator + ThemeConfig.configFileName)
-                .writeText(it)
-        }
         DirectLinkUpload.getConfig()?.let {
             FileUtils.createFileIfNotExist(backupPath + File.separator + DirectLinkUpload.ruleFileName)
                 .writeText(GSON.toJson(it))
@@ -211,7 +203,7 @@ object Backup {
             File(backupPath), modules,
             appCtx.defaultSharedPreferences.all.filterKeys { BackupModules.includesPreference(it, modules) },
         )
-        appCtx.getSharedPreferences(backupPath, "config")?.let { sp ->
+        requireNotNull(BackupPreferences.open(backupPath, "config")) { "无法创建备份设置" }.let { sp ->
             val edit = sp.edit().clear()
             preferences.forEach { (key, value) ->
                 run {
@@ -235,20 +227,21 @@ object Backup {
             }
             check(edit.commit()) { "无法写入备份设置" }
         }
+        check(File(backupPath, "config.xml").isFile) { "备份设置文件不存在" }
         currentCoroutineContext().ensureActive()
-        if (BackupModule.OTHER.id in modules) appCtx.getSharedPreferences(backupPath, "videoConfig")?.let { sp ->
-            sp.edit(commit = true) {
-                clear()
-                appCtx.getSharedPreferences(VIDEO_PREF_NAME, Context.MODE_PRIVATE).all.forEach { (key, value) ->
-                    when (value) {
-                        is Int -> putInt(key, value)
-                        is Boolean -> putBoolean(key, value)
-                        is Long -> putLong(key, value)
-                        is Float -> putFloat(key, value)
-                        is String -> putString(key, value)
-                    }
+        if (BackupModule.OTHER.id in modules) {
+            val sp = requireNotNull(BackupPreferences.open(backupPath, "videoConfig")) { "无法创建视频备份设置" }
+            val edit = sp.edit().clear()
+            appCtx.getSharedPreferences(VIDEO_PREF_NAME, Context.MODE_PRIVATE).all.forEach { (key, value) ->
+                when (value) {
+                    is Int -> edit.putInt(key, value)
+                    is Boolean -> edit.putBoolean(key, value)
+                    is Long -> edit.putLong(key, value)
+                    is Float -> edit.putFloat(key, value)
+                    is String -> edit.putString(key, value)
                 }
             }
+            check(edit.commit() && File(backupPath, "videoConfig.xml").isFile) { "无法写入视频备份设置" }
         }
         currentCoroutineContext().ensureActive()
         val zipFileName = getNowZipFileName()

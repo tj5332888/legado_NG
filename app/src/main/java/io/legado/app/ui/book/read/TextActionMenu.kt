@@ -31,6 +31,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.core.graphics.drawable.toBitmap
 import androidx.core.view.ViewCompat
@@ -43,6 +44,7 @@ import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import io.legado.app.R
 import io.legado.app.constant.AppLog
+import io.legado.app.data.entities.BookCharacter
 import io.legado.app.data.entities.Bookmark
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.config.NgThemeRuntimeAssets
@@ -90,11 +92,14 @@ class TextActionMenu(private val context: ComponentActivity, private val callBac
     private val menuItems: List<MenuItemImpl> = buildMenuItems()
     private val actionOrderState = mutableStateOf(TextSelectionActionOrder.load())
     private val disabledActionKeysState = mutableStateOf(TextSelectionActionOrder.disabledKeys())
+    private val showActionTextState = mutableStateOf(TextSelectionActionOrder.showText())
     private val currentPageState = mutableIntStateOf(0)
     private val moreMenuVisibleState = mutableStateOf(false)
     private val textHighlightState = mutableStateOf<Bookmark?>(null)
+    private val selectionCharacterState = mutableStateOf<BookCharacter?>(null)
     private val textHighlightPopupModeState = mutableStateOf(TextHighlightPopupMode.TOOLBAR)
     private val noteEditorVisibleState = mutableStateOf(false)
+    private val noteEditorMaxHeightState = mutableIntStateOf(TEXT_HIGHLIGHT_NOTE_EDITOR_HEIGHT_DP.dpToPx())
     private val noteDraftState = mutableStateOf("")
     private val themeSnapshotState = mutableStateOf(ReadDrawerStyle.themeSnapshot(context))
     private var moreMenuPopup: PopupWindow? = null
@@ -177,6 +182,11 @@ class TextActionMenu(private val context: ComponentActivity, private val callBac
                             iconBitmap = null,
                             onClick = { deleteTextHighlight(highlight) },
                         )
+                    } else if (
+                        item.itemId == R.id.menu_character_card &&
+                        selectionCharacterState.value != null
+                    ) {
+                        action.copy(title = context.getString(R.string.view_character_card))
                     } else action
                 }
             }
@@ -209,6 +219,7 @@ class TextActionMenu(private val context: ComponentActivity, private val callBac
                     } else {
                         TextSelectionToolbar(
                             primaryActions = primaryActions,
+                            showText = showActionTextState.value,
                             currentPage = currentPageState.intValue,
                             onPageChange = {
                                 currentPageState.intValue = it
@@ -220,6 +231,9 @@ class TextActionMenu(private val context: ComponentActivity, private val callBac
                             textHighlight = textHighlight,
                             onHighlightStyleChange = ::updateTextHighlight,
                             noteEditorVisible = noteEditorVisibleState.value,
+                            noteEditorMaxHeight = with(LocalDensity.current) {
+                                noteEditorMaxHeightState.intValue.toDp()
+                            },
                             noteDraft = noteDraftState.value,
                             onNoteEditorVisibleChange = ::setNoteEditorVisible,
                             onNoteDraftChange = { noteDraftState.value = it },
@@ -261,6 +275,12 @@ class TextActionMenu(private val context: ComponentActivity, private val callBac
             callBack.onTextHighlightMenuDismissed()
         }
     }
+
+    fun setSelectionCharacterCard(character: BookCharacter?) {
+        selectionCharacterState.value = character
+    }
+
+    fun selectionCharacterCard(): BookCharacter? = selectionCharacterState.value
 
     fun show(
         view: View,
@@ -312,6 +332,7 @@ class TextActionMenu(private val context: ComponentActivity, private val callBac
         ReadFloatingAppearanceState.refreshFromConfig()
         actionOrderState.value = TextSelectionActionOrder.load()
         disabledActionKeysState.value = TextSelectionActionOrder.disabledKeys()
+        showActionTextState.value = TextSelectionActionOrder.showText()
         themeSnapshotState.value = ReadDrawerStyle.themeSnapshot(context)
         currentPageState.intValue = 0
         dismissMoreMenu()
@@ -320,6 +341,9 @@ class TextActionMenu(private val context: ComponentActivity, private val callBac
         textHighlightState.value = textHighlight
         textHighlightPopupModeState.value = initialTextHighlightPopupMode(textHighlight)
         noteEditorVisibleState.value = false
+        if (textHighlight != null) {
+            selectionCharacterState.value = null
+        }
         noteDraftState.value = textHighlight?.content.orEmpty()
         isFocusable = false
         if (textHighlight == null) {
@@ -663,6 +687,14 @@ class TextActionMenu(private val context: ComponentActivity, private val callBac
         val availableSpace = max(aboveSpace, belowSpace)
             .takeIf { it >= min(desiredHeight, TEXT_SELECTION_TOOLBAR_HEIGHT_DP.dpToPx()) }
             ?: safeHeight
+        if (noteEditorVisibleState.value) {
+            val otherRowsHeight = (
+                textSelectionToolbarHeightDp(showHighlightEditor = true) +
+                    TEXT_HIGHLIGHT_NOTE_EDITOR_GAP_DP
+                ).dpToPx()
+            noteEditorMaxHeightState.intValue = (availableSpace - otherRowsHeight)
+                .coerceAtLeast(TEXT_HIGHLIGHT_NOTE_EDITOR_HEIGHT_DP.dpToPx())
+        }
         val expandedHeight = desiredHeight.coerceAtMost(availableSpace)
         val expandedY = anchoredPopupY(expandedHeight)
         if (toolbarHeight == expandedHeight && toolbarY == expandedY) {
@@ -796,10 +828,11 @@ class TextActionMenu(private val context: ComponentActivity, private val callBac
     @DrawableRes
     private fun menuIcon(itemId: Int): Int = when (itemId) {
         R.id.menu_replace -> R.drawable.ic_cfg_replace
-        R.id.menu_ai_purify -> R.drawable.ic_ai_purify
-        R.id.menu_copy -> R.drawable.ic_copy
-        R.id.menu_bookmark -> R.drawable.ic_text_highlight
+        R.id.menu_ai_purify -> R.drawable.ic_text_selection_ai_purify
+        R.id.menu_copy -> R.drawable.ic_text_selection_copy
+        R.id.menu_bookmark -> R.drawable.ic_text_selection_highlight
         R.id.menu_aloud -> R.drawable.ic_read_aloud
+        R.id.menu_character_card -> R.drawable.ic_bookshelf_action_user
         R.id.menu_dict -> R.drawable.ic_translate
         R.id.menu_search_content -> R.drawable.ic_search
         R.id.menu_browser -> R.drawable.ic_web_outline

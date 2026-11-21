@@ -4,7 +4,9 @@ import androidx.annotation.DrawableRes
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -22,12 +24,15 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -37,8 +42,10 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -64,13 +71,14 @@ fun NgActionChip(
     @DrawableRes iconRes: Int? = null,
     onLongClick: (() -> Unit)? = null,
 ) {
-    val contentColor = Color.White
+    val colors = rememberNgSolidButtonColors(Color(NgTheme.colors.primary))
+    val contentColor = Color(colors.content)
     Row(
         modifier = modifier
             .height(CHIP_HEIGHT)
             .widthIn(max = 360.dp)
             .clip(RoundedCornerShape(16.dp))
-            .background(Color(NgTheme.colors.primary))
+            .background(Color(colors.container))
             .then(
                 if (onLongClick != null) {
                     Modifier.combinedClickable(
@@ -143,6 +151,10 @@ fun NgFilterChipGroup(
                     )
                 }
             }
+        }
+
+        NgFilterChipGroupVariant.EVEN_ROW -> {
+            NgEvenFilterChipRow(items, selectedKeys, onToggle, modifier)
         }
 
         NgFilterChipGroupVariant.TWO_ROW_RAIL -> {
@@ -219,6 +231,39 @@ private fun NgSingleRowFilterChipRail(
         if (trailingContent != null) {
             Spacer(modifier = Modifier.width(CHIP_GAP))
             trailingContent()
+        }
+    }
+}
+
+/** 分类等宽铺满一行；窄屏或大字号放不下时保留横向滚动。 */
+@Composable
+private fun NgEvenFilterChipRow(
+    items: List<NgFilterChipItem>,
+    selectedKeys: Set<String>,
+    onToggle: (String) -> Unit,
+    modifier: Modifier,
+) {
+    if (items.isEmpty()) return
+    val density = LocalDensity.current
+    val textMeasurer = rememberTextMeasurer()
+    val textStyle = LocalTextStyle.current.copy(fontSize = 13.sp, lineHeight = 16.sp)
+    val minimumWidth = remember(items, density, textMeasurer, textStyle) {
+        items.maxOf { item ->
+            val textWidth = with(density) {
+                textMeasurer.measure(item.label, textStyle, maxLines = 1).size.width.toDp()
+            }
+            textWidth + 22.dp + if (item.iconRes == null) 0.dp else 21.dp
+        }
+    }
+    BoxWithConstraints(modifier) {
+        val itemWidth = maxOf(minimumWidth, (maxWidth - CHIP_GAP * (items.size - 1)) / items.size)
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(CHIP_GAP),
+        ) {
+            items.forEach { item ->
+                NgFilterChip(item, item.key in selectedKeys, { onToggle(item.key) }, Modifier.width(itemWidth))
+            }
         }
     }
 }

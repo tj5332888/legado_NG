@@ -1,12 +1,16 @@
 package io.legado.app.ui.book.toc
 
 import io.legado.app.data.entities.CatalogOutlineEntry
+import io.legado.app.ui.book.read.catalogSourceOrder
 import io.legado.app.ui.book.read.visibleCatalogRows
 
 internal data class TocCatalogProjection(
     val visibleRows: List<CatalogOutlineEntry>,
     val parentVolumeByKey: Map<String, String>,
 )
+
+internal fun TocCatalogProjection.inDisplayOrder(descending: Boolean): TocCatalogProjection =
+    if (descending) copy(visibleRows = visibleRows.asReversed()) else this
 
 internal fun projectTocCatalogRows(
     rows: List<CatalogOutlineEntry>,
@@ -19,10 +23,9 @@ internal fun projectTocCatalogRows(
 
     // ReverseToc changes the stored order and indices. Membership follows source order,
     // while row identity and indices must remain those supplied by the caller.
-    val sourceOrder = if (reversed) rows.asReversed() else rows
     val parents = mutableMapOf<String, String>()
     var volumeKey: String? = null
-    sourceOrder.forEach { row ->
+    catalogSourceOrder(rows, reversed).forEach { row ->
         if (row.isVolume) {
             volumeKey = row.url
         } else {
@@ -30,7 +33,7 @@ internal fun projectTocCatalogRows(
         }
     }
     return TocCatalogProjection(
-        visibleRows = visibleCatalogRows(sourceOrder, collapsedVolumes, reversed),
+        visibleRows = visibleCatalogRows(rows, collapsedVolumes, descending = false, reversed = reversed),
         parentVolumeByKey = parents,
     )
 }

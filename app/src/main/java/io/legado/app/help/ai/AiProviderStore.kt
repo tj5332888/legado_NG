@@ -8,32 +8,27 @@ import io.legado.app.utils.GSON
 import io.legado.app.utils.getPrefBoolean
 import io.legado.app.utils.getPrefInt
 import io.legado.app.utils.getPrefString
-import io.legado.app.utils.putPrefBoolean
 import io.legado.app.utils.putPrefString
 import splitties.init.appCtx
 
 object AiProviderStore {
 
+    @Synchronized
     fun providers(): List<AiProviderSetting> {
         val saved = readSavedProviders()
         if (saved.isEmpty()) {
+            // 只在首次初始化时启用全部内置提供商，之后尊重用户手动禁用的状态。
             val migrated = enableBuiltInAiProviders(migrateLegacyConfig(AiDefaultProviders.all()))
             saveProviders(migrated)
-            appCtx.putPrefBoolean(PreferKey.aiBuiltInProvidersEnabled, true)
             return migrated
         }
         val merged = mergeWithDefaults(saved).map { provider ->
             provider.copy(models = enrichUnspecifiedAiModels(provider.models))
         }
-        val needsEnable = !appCtx.getPrefBoolean(PreferKey.aiBuiltInProvidersEnabled, false)
-        val providers = if (needsEnable) enableBuiltInAiProviders(merged) else merged
-        if (providers != saved) {
-            saveProviders(providers)
+        if (merged != saved) {
+            saveProviders(merged)
         }
-        if (needsEnable) {
-            appCtx.putPrefBoolean(PreferKey.aiBuiltInProvidersEnabled, true)
-        }
-        return providers
+        return merged
     }
 
     fun enabledProviders(): List<AiProviderSetting> {
@@ -44,6 +39,7 @@ object AiProviderStore {
         return providers().firstOrNull { it.id == id }
     }
 
+    @Synchronized
     fun saveProvider(provider: AiProviderSetting) {
         val providers = providers()
         if (providers.any { it.id == provider.id }) {
@@ -53,12 +49,40 @@ object AiProviderStore {
         }
     }
 
+    @Synchronized
     fun createCustomProvider(type: AiProviderType): AiProviderSetting {
         val provider = defaultCustomProvider(type).copy(id = nextCustomProviderId(type))
         saveProvider(provider)
         return provider
     }
 
+    /**
+     * 将提供商配置恢复为初始状态。保留 API Key、启用状态、模型列表和已选模型，
+     * 避免为了修正 Base URL 而重新填写密钥或丢失模型选择。
+     */
+    @Synchronized
+    fun resetProvider(id: String): AiProviderSetting? {
+        val current = provider(id) ?: return null
+        val defaults = if (current.builtIn) {
+            AiDefaultProviders.all().firstOrNull { it.id == id }
+        } else {
+            defaultCustomProvider(current.type).copy(id = id)
+        } ?: return null
+        val autoName = !current.builtIn && current.name == aiProviderHost(current.baseUrl)
+        val reset = defaults.copy(
+            name = if (current.builtIn || autoName) defaults.name else current.name,
+            apiKey = current.apiKey,
+            enabled = current.enabled,
+            model = current.model,
+            models = current.models,
+            availableModelIds = current.availableModelIds,
+            availableModelSelectionInitialized = current.availableModelSelectionInitialized
+        )
+        saveProvider(reset)
+        return reset
+    }
+
+    @Synchronized
     fun deleteCustomProvider(id: String): Boolean {
         val providers = providers()
         val provider = providers.firstOrNull { it.id == id } ?: return false
@@ -77,6 +101,21 @@ object AiProviderStore {
         return true
     }
 
+    @Synchronized
+    internal fun saveInitialFetchedModels(
+        requested: AiProviderSetting,
+        models: List<AiModel>,
+    ): AiProviderSetting? {
+        val providers = providers()
+        val current = providers.firstOrNull { it.id == requested.id } ?: return null
+        val updated = initialFetchedModelsUpdate(requested, current, models) ?: return null
+        if (updated != current) {
+            saveProviders(providers.map { if (it.id == current.id) updated else it })
+        }
+        return updated
+    }
+
+    @Synchronized
     fun saveProviders(providers: List<AiProviderSetting>) {
         appCtx.putPrefString(
             PreferKey.aiProvidersJson,
@@ -267,27 +306,20 @@ object AiProviderStore {
     }
 
     private fun defaultCustomProvider(type: AiProviderType): AiProviderSetting {
-        return when (type) {
-            AiProviderType.CLAUDE -> AiProviderSetting(
-                id = "",
-                type = AiProviderType.CLAUDE,
-                builtIn = false,
-                name = "Custom Anthropic",
-                baseUrl = "https://api.anthropic.com/v1",
-                modelsUrl = "/models",
-                enabled = true
-            )
-            AiProviderType.OPENAI,
-            AiProviderType.GOOGLE -> AiProviderSetting(
-                id = "",
-                type = AiProviderType.OPENAI,
-                builtIn = false,
-                name = "Custom OpenAI",
-                baseUrl = "https://api.openai.com/v1",
-                modelsUrl = "/models",
-                enabled = true
-            )
+        val baseUrl = when (type) {
+            AiProviderType.CLAUDE -> "https://api.anthropic.com/v1"
+            AiProviderType.GOOGLE -> "https://generativelanguage.googleapis.com/v1beta"
+            AiProviderType.OPENAI -> "https://api.openai.com/v1"
         }
+        return AiProviderSetting(
+            id = "",
+            type = type,
+            builtIn = false,
+            name = aiProviderHost(baseUrl),
+            baseUrl = baseUrl,
+            modelsUrl = "/models",
+            enabled = true
+        )
     }
 
     private fun nextCustomProviderId(type: AiProviderType): String {

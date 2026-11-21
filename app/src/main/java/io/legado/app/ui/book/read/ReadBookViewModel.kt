@@ -18,11 +18,13 @@ import io.legado.app.exception.NoStackTraceException
 import io.legado.app.help.AppWebDav
 import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.ContentProcessor
+import io.legado.app.help.book.getBookSource
 import io.legado.app.help.book.isEpub
 import io.legado.app.help.book.isLocal
 import io.legado.app.help.book.isLocalModified
 import io.legado.app.help.book.removeType
 import io.legado.app.help.book.simulatedTotalChapterNum
+import io.legado.app.help.book.withChapterCachePublication
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.coroutine.Coroutine
 import io.legado.app.model.ImageProvider
@@ -43,6 +45,7 @@ import io.legado.app.utils.postEvent
 import io.legado.app.utils.toStringArray
 import io.legado.app.utils.toastOnUi
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collect
@@ -52,6 +55,7 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.onEmpty
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.take
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileNotFoundException
@@ -90,7 +94,7 @@ class ReadBookViewModel(application: Application) : BaseViewModel(application) {
     /**
      * 初始化
      */
-    fun initData(intent: Intent, success: (() -> Unit)? = null) {
+    fun initData(intent: Intent, onBookBound: ((String) -> Unit)? = null, success: (() -> Unit)? = null) {
         execute {
             ReadBook.inBookshelf = intent.getBooleanExtra("inBookshelf", true)
             ReadBook.chapterChanged = intent.getBooleanExtra("chapterChanged", false)
@@ -107,7 +111,7 @@ class ReadBookViewModel(application: Application) : BaseViewModel(application) {
             }
             val hasExplicitPosition = bookmark != null || (index >= 0 && chapterPos >= 0)
             when {
-                book != null -> initBook(book, hasExplicitPosition)
+                book != null -> initBook(book, hasExplicitPosition, onBookBound)
                 else -> {
                     ReadBook.upMsg(context.getString(R.string.no_book))
                     AppLog.put("未找到书籍\nbookUrl:$bookUrl")
@@ -131,7 +135,7 @@ class ReadBookViewModel(application: Application) : BaseViewModel(application) {
         }
     }
 
-    private suspend fun initBook(book: Book, hasExplicitPosition: Boolean) {
+    private suspend fun initBook(book: Book, hasExplicitPosition: Boolean, onBookBound: ((String) -> Unit)?) {
         readingRecordBookKey = book.bookUrl
         val startup = if (book.isEpub) io.legado.app.ui.book.read.epub.EpubStartupTiming("book-init") else null
         val isSameBook = ReadBook.book?.bookUrl == book.bookUrl
@@ -144,6 +148,7 @@ class ReadBookViewModel(application: Application) : BaseViewModel(application) {
         startup?.mark("reader-bound")
         prepareReplaceRuleResetOnEnter(book)
         isInitFinish = true
+        if (onBookBound != null) withContext(Dispatchers.Main) { onBookBound(book.bookUrl) }
         if (!book.isLocal && book.tocUrl.isEmpty() && !loadBookInfo(book)) {
             return
         }
@@ -494,12 +499,26 @@ class ReadBookViewModel(application: Application) : BaseViewModel(application) {
      * 保存内容
      */
     fun saveContent(book: Book, content: String) {
+        val chapterIndex = ReadBook.durChapterIndex
+        val generation = ReadBook.captureLoadGeneration(book.bookUrl) ?: return
+        val chapterUrl = ReadBook.curTextChapter?.chapter
+            ?.takeIf { it.bookUrl == book.bookUrl && it.index == chapterIndex }
+            ?.url
         execute {
-            appDb.bookChapterDao.getChapter(book.bookUrl, ReadBook.durChapterIndex)
-                ?.let { chapter ->
-                    BookHelp.saveText(book, chapter, content)
-                    ReadBook.loadContent(ReadBook.durChapterIndex, resetPageOffset = false)
-                }
+            val saved = withChapterCachePublication(book.bookUrl) {
+                val chapter = if (chapterUrl != null) {
+                    appDb.bookChapterDao.getChapterByUrl(book.bookUrl, chapterUrl)
+                } else if (ReadBook.isLoadCurrent(book.bookUrl, generation)) {
+                    // A loading/error page may have no TextChapter; only trust its unchanged epoch.
+                    appDb.bookChapterDao.getChapter(book.bookUrl, chapterIndex)
+                } else null
+                if (chapter == null) return@withChapterCachePublication false
+                BookHelp.saveText(book, chapter, content)
+                true
+            }
+            if (saved && ReadBook.book?.bookUrl == book.bookUrl) {
+                ReadBook.loadContent(ReadBook.durChapterIndex, resetPageOffset = false)
+            }
         }
     }
 
@@ -507,16 +526,31 @@ class ReadBookViewModel(application: Application) : BaseViewModel(application) {
      * 反转内容
      */
     fun reverseContent(book: Book) {
+        val chapterIndex = ReadBook.durChapterIndex
+        val generation = ReadBook.captureLoadGeneration(book.bookUrl) ?: return
+        val chapterUrl = ReadBook.curTextChapter?.chapter
+            ?.takeIf { it.bookUrl == book.bookUrl && it.index == chapterIndex }
+            ?.url
         execute {
-            val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, ReadBook.durChapterIndex)
-                ?: return@execute
-            val content = BookHelp.getContent(book, chapter) ?: return@execute
-            val stringBuilder = StringBuilder()
-            content.toStringArray().forEach {
-                stringBuilder.insert(0, it)
+            val saved = withChapterCachePublication(book.bookUrl) {
+                val chapter = if (chapterUrl != null) {
+                    appDb.bookChapterDao.getChapterByUrl(book.bookUrl, chapterUrl)
+                } else if (ReadBook.isLoadCurrent(book.bookUrl, generation)) {
+                    appDb.bookChapterDao.getChapter(book.bookUrl, chapterIndex)
+                } else null
+                if (chapter == null) return@withChapterCachePublication false
+                val content = BookHelp.getContent(book, chapter)
+                    ?: return@withChapterCachePublication false
+                val stringBuilder = StringBuilder()
+                content.toStringArray().forEach {
+                    stringBuilder.insert(0, it)
+                }
+                BookHelp.saveText(book, chapter, stringBuilder.toString())
+                true
             }
-            BookHelp.saveText(book, chapter, stringBuilder.toString())
-            ReadBook.loadContent(ReadBook.durChapterIndex, resetPageOffset = false)
+            if (saved && ReadBook.book?.bookUrl == book.bookUrl) {
+                ReadBook.loadContent(ReadBook.durChapterIndex, resetPageOffset = false)
+            }
         }
     }
 
@@ -618,7 +652,8 @@ class ReadBookViewModel(application: Application) : BaseViewModel(application) {
         src ?: return
         val book = ReadBook.book ?: return
         execute {
-            val image = BookHelp.getImage(book, src)
+            val image = BookHelp.getImage(book, src).takeIf { it.isFile }
+                ?: ImageProvider.cacheImage(book, src, book.getBookSource())
             FileInputStream(image).use { input ->
                 if (uri.isContentScheme()) {
                     DocumentFile.fromTreeUri(context, uri)?.let { doc ->

@@ -354,6 +354,16 @@
             android:hardwareAccelerated="true" />
         <!-- 阅读记录 -->
         <activity
+            android:name=".ui.pet.PetManagerActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize"
+            android:hardwareAccelerated="true" />
+        <activity
+            android:name=".ui.resource.ResourceCenterActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize"
+            android:hardwareAccelerated="true" />
+        <activity
             android:name=".ui.about.ReadRecordActivity"
             android:configChanges="orientation|screenSize"
             android:hardwareAccelerated="true" />
@@ -555,6 +565,10 @@
         <service
             android:name=".service.HttpReadAloudService"
             android:foregroundServiceType="mediaPlayback" />
+        <service
+            android:name=".help.tts.packages.MicrosoftOfflineService"
+            android:exported="false"
+            android:process=":tts_microsoft" />
         <service
             android:name=".service.AudioPlayService"
             android:foregroundServiceType="mediaPlayback" />

@@ -3,6 +3,7 @@ package io.legado.app.help.ai
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import kotlinx.coroutines.CancellationException
 import okhttp3.Request
 
 class OpenAiCompatibleProvider : AiProvider {
@@ -19,6 +20,7 @@ class OpenAiCompatibleProvider : AiProvider {
                             addHeader("Authorization", "Bearer ${setting.apiKey}")
                         }
                     }
+                    .addOpenCodeProviderHeaders(setting)
                     .get()
                     .build()
                 val (response, body) = client.executeJsonOrThrow(request)
@@ -30,6 +32,8 @@ class OpenAiCompatibleProvider : AiProvider {
                 }
                 val json = JsonParser.parseString(body).asJsonObject
                 return parseModels(json)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Throwable) {
                 lastError = e
             }
@@ -72,6 +76,7 @@ class OpenAiCompatibleProvider : AiProvider {
                     addHeader("Authorization", "Bearer ${setting.apiKey}")
                 }
             }
+            .addOpenCodeProviderHeaders(setting)
             .addHeader("Content-Type", "application/json")
             .post(jsonBody(requestBody))
             .build()

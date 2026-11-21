@@ -26,6 +26,7 @@ import com.google.android.material.bottomsheet.BottomSheetBehavior
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import io.legado.app.R
 import io.legado.app.help.ai.AiConfig
+import io.legado.app.help.ai.AiDefaultProviders
 import io.legado.app.help.ai.AiManager
 import io.legado.app.help.ai.AiModel
 import io.legado.app.help.ai.AiModelAbility
@@ -158,6 +159,16 @@ object AiAssistantConfigUi {
                                 }
                             }
                             refreshJob?.start()
+                        }
+                    },
+                    onFetchProvider = { providerId ->
+                        val provider = withContext(Dispatchers.IO) {
+                            AiManager.ensureProviderModelCatalog(providerId)
+                            assistantModelSelectionProviders().firstOrNull { it.id == providerId }
+                        }
+                        if (dialog.isShowing) {
+                            sheetState = sheetState.withUpdatedProvider(providerId, provider)
+                            onChanged()
                         }
                     },
                     onSelect = { providerId, modelId ->
@@ -862,26 +873,35 @@ internal fun AiProviderSetting.assistantEligibleModels(): List<AiModel> {
         .filter { it.supportsChatText() }
 }
 
+internal fun List<AiProviderSetting>.modelSelectionEligibleProviders(): List<AiProviderSetting> {
+    return filter { it.enabled && it.apiKey.isNotBlank() }
+}
+
 internal fun assistantModelSelectionProviders(): List<AiModelSelectionProviderUiModel> {
-    return AiProviderStore.providers().mapNotNull { provider ->
-        if (!provider.enabled) return@mapNotNull null
-        val models = provider.assistantEligibleModels()
-        if (models.isEmpty()) return@mapNotNull null
-        AiModelSelectionProviderUiModel(
-            id = provider.id,
-            name = provider.name,
-            iconRes = provider.iconRes(),
-            models = models.map { model ->
-                AiModelSelectionItemUiModel(
-                    id = model.safeId(),
-                    name = model.displayName(),
-                    searchAliases = listOf(model.safeName()),
-                    iconRes = model.iconRes(provider.iconRes()),
-                    capabilities = model.capabilityTags(),
-                )
-            },
-        )
+    return AiProviderStore.providers().modelSelectionEligibleProviders().map { provider ->
+        provider.toModelSelectionProviderUiModel(provider.assistantEligibleModels())
     }
+}
+
+internal fun AiProviderSetting.toModelSelectionProviderUiModel(
+    eligibleModels: List<AiModel>,
+): AiModelSelectionProviderUiModel {
+    return AiModelSelectionProviderUiModel(
+        id = id,
+        name = name,
+        iconRes = iconRes(),
+        models = eligibleModels.map { model ->
+            AiModelSelectionItemUiModel(
+                id = model.safeId(),
+                name = model.displayName(),
+                searchAliases = listOf(model.safeName()),
+                iconRes = model.iconRes(iconRes()),
+                capabilities = model.capabilityTags(),
+            )
+        },
+        needsFetch = apiKey.isNotBlank() && models.isEmpty(),
+        noEnabledModels = models.isNotEmpty() && effectiveAvailableModelIds().isEmpty(),
+    )
 }
 
 internal fun AiProviderSetting.displayModels(): List<AiModel> {
@@ -960,6 +980,7 @@ internal fun AiModel.capabilityTags(): List<ModelCapabilityTag> {
 internal fun AiProviderSetting.iconRes(): Int {
     return when (id) {
         "openai" -> R.drawable.ic_provider_openai
+        AiDefaultProviders.OPENCODE_ID -> R.drawable.ic_provider_opencode
         "claude" -> R.drawable.ic_provider_claude
         "gemini" -> R.drawable.ic_provider_gemini
         "deepseek" -> R.drawable.ic_provider_deepseek

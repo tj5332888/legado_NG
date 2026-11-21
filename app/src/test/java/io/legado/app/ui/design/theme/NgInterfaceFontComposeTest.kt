@@ -160,10 +160,10 @@ class NgInterfaceFontComposeTest {
             composeRule.setContent {
                 NgAppTheme(updateSystemBars = false) {
                     Text("live-interface-text")
-                    if (visible.value) ThemeInterfaceFontEditorSheet {
+                    if (visible.value) ThemeInterfaceFontEditorSheet(onDismissRequest = {
                         dismissed.set(true)
                         visible.value = false
-                    }
+                    })
                 }
             }
             waitForFontRow("selected-reload-font")
@@ -221,7 +221,7 @@ class NgInterfaceFontComposeTest {
             composeRule.setContent {
                 NgAppTheme(updateSystemBars = false) {
                     Text("live-interface-text")
-                    if (visible.value) ThemeInterfaceFontEditorSheet { visible.value = false }
+                    if (visible.value) ThemeInterfaceFontEditorSheet(onDismissRequest = { visible.value = false })
                 }
             }
             waitForFontRow("selected-reload-font")
@@ -275,7 +275,7 @@ class NgInterfaceFontComposeTest {
             composeRule.setContent {
                 NgAppTheme(updateSystemBars = false) {
                     Text("live-interface-text")
-                    if (visible.value) ThemeInterfaceFontEditorSheet { visible.value = false }
+                    if (visible.value) ThemeInterfaceFontEditorSheet(onDismissRequest = { visible.value = false })
                 }
             }
             try {

@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.ui.test.ExperimentalTestApi::class)
+
 package io.legado.app.ui.widget.dialog
 
 import androidx.compose.runtime.getValue

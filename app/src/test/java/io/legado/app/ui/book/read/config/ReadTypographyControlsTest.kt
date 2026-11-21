@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.ui.test.ExperimentalTestApi::class)
+
 package io.legado.app.ui.book.read.config
 
 import android.content.Context

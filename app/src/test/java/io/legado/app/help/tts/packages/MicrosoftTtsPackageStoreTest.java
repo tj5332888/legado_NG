@@ -95,8 +95,9 @@ public class MicrosoftTtsPackageStoreTest {
         assertTrue(orphanDir.mkdir());
         File stage = new File(root, "staging/interrupted");
         assertTrue(stage.mkdir());
-        Files.writeString(new File(root, "journal.json").toPath(),
-                "{\"new_objects\":[\"" + committed + "\",\"" + orphan + "\"]}");
+        Files.write(new File(root, "journal.json").toPath(),
+                ("{\"new_objects\":[\"" + committed + "\",\"" + orphan + "\"]}")
+                        .getBytes(StandardCharsets.UTF_8));
         MicrosoftTtsPackageStore recovered = new MicrosoftTtsPackageStore(root);
         assertEquals(2, recovered.installed().size());
         assertTrue(new File(root, "objects/" + committed).isDirectory());
@@ -127,7 +128,7 @@ public class MicrosoftTtsPackageStoreTest {
         store.install(store.inspect(fixture.bundle, DEVICE), Collections.singleton(fixture.signer));
         Map<String, String> graph = store.latestGraph(DEVICE);
         File license = new File(store.credential(graph, VOICE, "model_license"));
-        assertEquals("fixture-license", Files.readString(license.toPath()));
+        assertEquals("fixture-license", new String(Files.readAllBytes(license.toPath()), StandardCharsets.UTF_8));
         assertNull(store.credential(graph, VOICE, "unknown"));
     }
 
@@ -170,9 +171,10 @@ public class MicrosoftTtsPackageStoreTest {
         MicrosoftTtsPackageStore store = new MicrosoftTtsPackageStore(root);
         store.install(store.inspect(addSecondVoice(fixture.bundle), DEVICE), Collections.singleton(fixture.signer));
         File registry = new File(root, "registry.json");
-        JsonObject old = JsonParser.parseString(Files.readString(registry.toPath())).getAsJsonObject();
+        JsonObject old = JsonParser.parseString(
+                new String(Files.readAllBytes(registry.toPath()), StandardCharsets.UTF_8)).getAsJsonObject();
         old.remove("catalog");
-        Files.writeString(registry.toPath(), GSON.toJson(old));
+        Files.write(registry.toPath(), GSON.toJson(old).getBytes(StandardCharsets.UTF_8));
         store = new MicrosoftTtsPackageStore(root);
         assertEquals(2, store.catalogVoices(store.latestGraph(DEVICE)).size());
         store.install(store.inspect(fixture.bundle, DEVICE), Collections.singleton(fixture.signer));
@@ -208,13 +210,15 @@ public class MicrosoftTtsPackageStoreTest {
         store.install(store.inspect(addSecondVoice(fixture.bundle), DEVICE), Collections.singleton(fixture.signer));
         String orphan = "1".repeat(64);
         assertTrue(new File(root, "objects/" + orphan).mkdir());
-        Files.writeString(new File(root, "journal.json").toPath(), "{\"new_objects\":[\"" + orphan + "\"]}");
+        Files.write(new File(root, "journal.json").toPath(),
+                ("{\"new_objects\":[\"" + orphan + "\"]}").getBytes(StandardCharsets.UTF_8));
         store = new MicrosoftTtsPackageStore(root);
         assertEquals(2, store.catalogVoices(store.latestGraph(DEVICE)).size());
         assertFalse(new File(root, "objects/" + orphan).exists());
         store.install(store.inspect(fixture.bundle, DEVICE), Collections.singleton(fixture.signer));
         String retained = store.snapshot().installed.iterator().next();
-        Files.writeString(new File(root, "journal.json").toPath(), "{\"new_objects\":[\"" + retained + "\"]}");
+        Files.write(new File(root, "journal.json").toPath(),
+                ("{\"new_objects\":[\"" + retained + "\"]}").getBytes(StandardCharsets.UTF_8));
         store = new MicrosoftTtsPackageStore(root);
         assertEquals(1, store.catalogVoices(store.latestGraph(DEVICE)).size());
         store.checkGraph(store.latestGraph(DEVICE), DEVICE);

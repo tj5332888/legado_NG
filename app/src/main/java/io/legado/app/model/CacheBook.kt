@@ -17,6 +17,7 @@ import io.legado.app.help.book.hasUsableChapterCacheContent
 import io.legado.app.help.book.isAudio
 import io.legado.app.help.book.isLocal
 import io.legado.app.help.book.menuCapabilities
+import io.legado.app.R
 import io.legado.app.help.cache.ReadingPaceController
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.coroutine.CompositeCoroutine
@@ -48,6 +49,7 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.CoroutineContext
+import splitties.init.appCtx
 
 object CacheBook {
 
@@ -242,9 +244,11 @@ object CacheBook {
 
     val downloadSummary: String
         get() {
-            val base =
-                "正在下载:${onDownloadCount}|等待中:${waitCount}|失败:${errorDownloadMap.count()}|成功:${successDownloadSet.size}"
-            val paused = if (isUserPaused) "|已暂停" else ""
+            val base = appCtx.getString(
+                R.string.cache_download_summary,
+                onDownloadCount, waitCount, errorDownloadMap.count(), successDownloadSet.size
+            )
+            val paused = if (isUserPaused) "|" + appCtx.getString(R.string.cache_paused_suffix) else ""
             val pace = ReadingPaceController.statusText ?: return base + paused
             return "$base$paused|$pace"
         }

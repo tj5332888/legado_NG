@@ -1,10 +1,12 @@
 package io.legado.app.help.cache
 
+import io.legado.app.R
 import io.legado.app.exception.ConcurrentException
 import io.legado.app.help.config.AppConfig
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import splitties.init.appCtx
 import java.util.Calendar
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.max
@@ -181,7 +183,8 @@ object ReadingPaceController {
 
     private fun formatWaiting(millis: Long): String {
         val seconds = (millis + 999L) / 1000L
-        return if (seconds <= 1L) "节奏等待:<1s" else "节奏等待:${seconds}s"
+        val value = if (seconds <= 1L) "<1s" else "${seconds}s"
+        return appCtx.getString(R.string.cache_pace_waiting_text, value)
     }
 
     /** 夜间静默：返回需要等待到静默结束的毫秒数，0 表示无需等待 */

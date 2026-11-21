@@ -2803,4 +2803,7 @@
     <string name="paragraph_icon_import_action">导入</string>
     <string name="paragraph_icon_delete_confirm">删除「%1$s」？</string>
     <string name="paragraph_icon_restore_confirm">清除所有新建和导入的气泡，并还原内置气泡的原始样式？</string>
+    <string name="cache_download_summary">正在下载:%1$d|等待中:%2$d|失败:%3$d|成功:%4$d</string>
+    <string name="cache_paused_suffix">已暂停</string>
+    <string name="cache_pace_waiting_text">节奏等待:%1$s</string>
 </resources>

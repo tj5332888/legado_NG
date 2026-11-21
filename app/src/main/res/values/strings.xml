@@ -2904,4 +2904,7 @@
     <string name="paragraph_icon_import_action">Import</string>
     <string name="paragraph_icon_delete_confirm">Delete “%1$s”?</string>
     <string name="paragraph_icon_restore_confirm">Delete all created and imported bubbles and restore the original built-in bubbles?</string>
+    <string name="cache_download_summary">Downloading: %1$d | Waiting: %2$d | Failed: %3$d | Done: %4$d</string>
+    <string name="cache_paused_suffix">Paused</string>
+    <string name="cache_pace_waiting_text">Pace wait: %1$s</string>
 </resources>
